@@ -36,6 +36,7 @@ import statistics
 import numpy as np
 import torch.distributions as dist
 from datetime import datetime
+import time
 
 # Import model building functions
 from fit_classifiers import build_model
@@ -155,8 +156,10 @@ def compute_pr_with_baseline_noise(
                             GMM behavior (which doesn't clip).
 
     Returns:
-        (pr, n_used, clean_acc): PR score, number of clean-correct samples, clean accuracy
+        (pr, n_used, clean_acc, wall_time): PR score, number of clean-correct samples, clean accuracy, wall time in seconds
     """
+    start_time = time.time()
+
     C, H, W = out_shape
 
     total_used = 0       # number of clean-correct samples
@@ -264,14 +267,16 @@ def compute_pr_with_baseline_noise(
 
     pr = pr_sum / max(1, total_used)
     clean_acc = clean_correct / max(1, total_seen)
+    wall_time = time.time() - start_time
 
     chunk_info = f", chunk_size={chunk_size}" if chunk_size is not None else ""
     clip_info = " (clipped)" if clip_to_valid_range else " (no clipping)"
     print(f"\n[PR@clean - Baseline] used={total_used} / seen={total_seen} "
           f"(clean acc={clean_acc*100:.2f}%), num_samples={num_samples}{chunk_info} → "
           f"PR={pr:.4f} [distribution: {distribution}, norm: {norm_type}, eps={epsilon:.6f}{clip_info}]")
+    print(f"Wall time: {wall_time:.2f}s")
 
-    return pr, total_used, clean_acc
+    return pr, total_used, clean_acc, wall_time
 
 
 # ==================== PGD Attack ====================
@@ -314,8 +319,10 @@ def evaluate_pgd(model, loader, epsilon, step_size, num_steps, device, max_batch
     Evaluate model under PGD attack on correctly classified samples only.
 
     Returns:
-        Dictionary with clean accuracy, robust accuracy on clean-correct set, and attack success rate
+        Dictionary with clean accuracy, robust accuracy on clean-correct set, attack success rate, and wall time
     """
+    start_time = time.time()
+
     model.eval()
     clean_correct = 0
     adv_correct_on_clean_correct = 0
@@ -365,12 +372,16 @@ def evaluate_pgd(model, loader, epsilon, step_size, num_steps, device, max_batch
             'attack_success': f'{attack_success_rate:.2f}%'
         })
 
+    wall_time = time.time() - start_time
+    print(f"Wall time: {wall_time:.2f}s")
+
     return {
         'clean_accuracy': clean_correct / total * 100 if total > 0 else 0,
         'robust_accuracy': adv_correct_on_clean_correct / clean_correct * 100 if clean_correct > 0 else 0,
         'attack_success_rate': (clean_correct - adv_correct_on_clean_correct) / clean_correct * 100 if clean_correct > 0 else 0,
         'num_samples': total,
-        'num_clean_correct': clean_correct
+        'num_clean_correct': clean_correct,
+        'wall_time': wall_time
     }
 
 
@@ -432,8 +443,10 @@ def evaluate_cw(model, loader, epsilon, step_size, num_steps, num_classes, devic
     Evaluate model under CW attack on correctly classified samples only.
 
     Returns:
-        Dictionary with clean accuracy, robust accuracy on clean-correct set, and attack success rate
+        Dictionary with clean accuracy, robust accuracy on clean-correct set, attack success rate, and wall time
     """
+    start_time = time.time()
+
     model.eval()
     clean_correct = 0
     adv_correct_on_clean_correct = 0
@@ -483,12 +496,16 @@ def evaluate_cw(model, loader, epsilon, step_size, num_steps, num_classes, devic
             'attack_success': f'{attack_success_rate:.2f}%'
         })
 
+    wall_time = time.time() - start_time
+    print(f"Wall time: {wall_time:.2f}s")
+
     return {
         'clean_accuracy': clean_correct / total * 100 if total > 0 else 0,
         'robust_accuracy': adv_correct_on_clean_correct / clean_correct * 100 if clean_correct > 0 else 0,
         'attack_success_rate': (clean_correct - adv_correct_on_clean_correct) / clean_correct * 100 if clean_correct > 0 else 0,
         'num_samples': total,
-        'num_clean_correct': clean_correct
+        'num_clean_correct': clean_correct,
+        'wall_time': wall_time
     }
 
 
@@ -626,7 +643,7 @@ def main():
     print("Evaluating Baseline Noise - Uniform Distribution")
     print(f"{'='*80}\n")
 
-    pr_uniform, n_used_uniform, clean_acc_uniform = compute_pr_with_baseline_noise(
+    pr_uniform, n_used_uniform, clean_acc_uniform, time_uniform = compute_pr_with_baseline_noise(
         model=model,
         loader=test_loader,
         out_shape=out_shape,
@@ -643,6 +660,7 @@ def main():
     print(f"  Clean Accuracy: {clean_acc_uniform*100:.2f}%")
     print(f"  Avg PR: {pr_uniform*100:.2f}%")
     print(f"  Num evaluated: {n_used_uniform}")
+    print(f"  Wall Time: {time_uniform:.2f}s")
 
     with open(log_file, 'a') as f:
         f.write(f"Baseline Noise - Uniform Distribution\n")
@@ -650,6 +668,7 @@ def main():
         f.write(f"  Clean Accuracy: {clean_acc_uniform*100:.2f}%\n")
         f.write(f"  Average PR: {pr_uniform*100:.2f}%\n")
         f.write(f"  Num evaluated: {n_used_uniform}\n")
+        f.write(f"  Wall Time: {time_uniform:.2f}s\n")
         f.write(f"\n")
 
     # ==================== Evaluate Baseline Noise (Gaussian) ====================
@@ -657,7 +676,7 @@ def main():
     print("Evaluating Baseline Noise - Gaussian Distribution")
     print(f"{'='*80}\n")
 
-    pr_gaussian, n_used_gaussian, clean_acc_gaussian = compute_pr_with_baseline_noise(
+    pr_gaussian, n_used_gaussian, clean_acc_gaussian, time_gaussian = compute_pr_with_baseline_noise(
         model=model,
         loader=test_loader,
         out_shape=out_shape,
@@ -674,6 +693,7 @@ def main():
     print(f"  Clean Accuracy: {clean_acc_gaussian*100:.2f}%")
     print(f"  Avg PR: {pr_gaussian*100:.2f}%")
     print(f"  Num evaluated: {n_used_gaussian}")
+    print(f"  Wall Time: {time_gaussian:.2f}s")
 
     with open(log_file, 'a') as f:
         f.write(f"Baseline Noise - Gaussian Distribution\n")
@@ -681,6 +701,7 @@ def main():
         f.write(f"  Clean Accuracy: {clean_acc_gaussian*100:.2f}%\n")
         f.write(f"  Average PR: {pr_gaussian*100:.2f}%\n")
         f.write(f"  Num evaluated: {n_used_gaussian}\n")
+        f.write(f"  Wall Time: {time_gaussian:.2f}s\n")
         f.write(f"\n")
 
     # ==================== Evaluate PGD Attack ====================
@@ -699,6 +720,7 @@ def main():
     print(f"  Attack Success Rate: {results_pgd['attack_success_rate']:.2f}%")
     print(f"  Num samples: {results_pgd['num_samples']}")
     print(f"  Num clean-correct: {results_pgd['num_clean_correct']}")
+    print(f"  Wall Time: {results_pgd['wall_time']:.2f}s")
 
     with open(log_file, 'a') as f:
         f.write(f"PGD Attack\n")
@@ -708,6 +730,7 @@ def main():
         f.write(f"  Attack Success Rate: {results_pgd['attack_success_rate']:.2f}%\n")
         f.write(f"  Num samples: {results_pgd['num_samples']}\n")
         f.write(f"  Num clean-correct: {results_pgd['num_clean_correct']}\n")
+        f.write(f"  Wall Time: {results_pgd['wall_time']:.2f}s\n")
         f.write(f"\n")
 
     # ==================== Evaluate CW Attack ====================
@@ -726,6 +749,7 @@ def main():
     print(f"  Attack Success Rate: {results_cw['attack_success_rate']:.2f}%")
     print(f"  Num samples: {results_cw['num_samples']}")
     print(f"  Num clean-correct: {results_cw['num_clean_correct']}")
+    print(f"  Wall Time: {results_cw['wall_time']:.2f}s")
 
     with open(log_file, 'a') as f:
         f.write(f"CW Attack\n")
@@ -735,31 +759,36 @@ def main():
         f.write(f"  Attack Success Rate: {results_cw['attack_success_rate']:.2f}%\n")
         f.write(f"  Num samples: {results_cw['num_samples']}\n")
         f.write(f"  Num clean-correct: {results_cw['num_clean_correct']}\n")
+        f.write(f"  Wall Time: {results_cw['wall_time']:.2f}s\n")
         f.write(f"\n")
 
     # ==================== Summary ====================
+    total_wall_time = time_uniform + time_gaussian + results_pgd['wall_time'] + results_cw['wall_time']
+
     print(f"\n{'='*80}")
     print("Evaluation Complete!")
     print(f"{'='*80}")
     print(f"\nSummary:")
-    print(f"  Baseline Uniform PR:     {pr_uniform*100:.2f}%")
-    print(f"  Baseline Gaussian PR:    {pr_gaussian*100:.2f}%")
-    print(f"  PGD Robust Accuracy:     {results_pgd['robust_accuracy']:.2f}%")
+    print(f"  Baseline Uniform PR:     {pr_uniform*100:.2f}%  (Wall Time: {time_uniform:.2f}s)")
+    print(f"  Baseline Gaussian PR:    {pr_gaussian*100:.2f}%  (Wall Time: {time_gaussian:.2f}s)")
+    print(f"  PGD Robust Accuracy:     {results_pgd['robust_accuracy']:.2f}%  (Wall Time: {results_pgd['wall_time']:.2f}s)")
     print(f"  PGD Attack Success Rate: {results_pgd['attack_success_rate']:.2f}%")
-    print(f"  CW Robust Accuracy:      {results_cw['robust_accuracy']:.2f}%")
+    print(f"  CW Robust Accuracy:      {results_cw['robust_accuracy']:.2f}%  (Wall Time: {results_cw['wall_time']:.2f}s)")
     print(f"  CW Attack Success Rate:  {results_cw['attack_success_rate']:.2f}%")
+    print(f"\n  Total Wall Time:         {total_wall_time:.2f}s")
     print(f"\nResults saved to: {log_file}\n")
 
     with open(log_file, 'a') as f:
         f.write(f"\n{'='*80}\n")
         f.write(f"Summary\n")
         f.write(f"{'='*80}\n")
-        f.write(f"  Baseline Uniform PR:     {pr_uniform*100:.2f}%\n")
-        f.write(f"  Baseline Gaussian PR:    {pr_gaussian*100:.2f}%\n")
-        f.write(f"  PGD Robust Accuracy:     {results_pgd['robust_accuracy']:.2f}%\n")
+        f.write(f"  Baseline Uniform PR:     {pr_uniform*100:.2f}%  (Wall Time: {time_uniform:.2f}s)\n")
+        f.write(f"  Baseline Gaussian PR:    {pr_gaussian*100:.2f}%  (Wall Time: {time_gaussian:.2f}s)\n")
+        f.write(f"  PGD Robust Accuracy:     {results_pgd['robust_accuracy']:.2f}%  (Wall Time: {results_pgd['wall_time']:.2f}s)\n")
         f.write(f"  PGD Attack Success Rate: {results_pgd['attack_success_rate']:.2f}%\n")
-        f.write(f"  CW Robust Accuracy:      {results_cw['robust_accuracy']:.2f}%\n")
+        f.write(f"  CW Robust Accuracy:      {results_cw['robust_accuracy']:.2f}%  (Wall Time: {results_cw['wall_time']:.2f}s)\n")
         f.write(f"  CW Attack Success Rate:  {results_cw['attack_success_rate']:.2f}%\n")
+        f.write(f"\n  Total Wall Time:         {total_wall_time:.2f}s\n")
         f.write(f"\n")
 
 
