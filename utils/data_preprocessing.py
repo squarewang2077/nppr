@@ -40,12 +40,10 @@ def get_img_size(dataset: str, manual_override: int = None) -> int:
 def get_dataset(name: str, root: str, train: bool, img_size: int):
     """Build dataset + num_classes."""
     name = name.lower()
-    mean, std = get_norm_stats(name)
 
     tf = T.Compose([
         T.Resize(img_size),
-        T.ToTensor(),
-        T.Normalize(mean, std)
+        T.ToTensor(),           # outputs [0, 1]; normalization is handled inside the model
     ])
 
     if name == "cifar10":
