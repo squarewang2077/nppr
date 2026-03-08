@@ -46,6 +46,7 @@ def pr_generator(model, x, y, epsilon=8/255, norm="linf", # general args
                 beta_mix=0.5, kappa=1.0, # loss args
                 K=2, sigma_list=None, fisher_damping=1e-4, tau=1.0, # posterior GMM args
                 num_samples=10, noise_scale=1.0, # sampling args
+                return_stats=True, # whether to return additional stats (e.g. pi_post, mu_all, sig_all
                 ):
     """
     Random-sampling PR/Bayesian perturbation generator:
@@ -111,7 +112,7 @@ def pr_generator(model, x, y, epsilon=8/255, norm="linf", # general args
 
     # mixed loss
     mixed = (1.0 - beta_mix) * ce + beta_mix * soft01
-    loss = mixed.mean()
+    loss = mixed.sum()
 
     # gradient
     g = torch.autograd.grad(loss, x_req)[0].detach()   # (B,C,H,W)
@@ -156,6 +157,45 @@ def pr_generator(model, x, y, epsilon=8/255, norm="linf", # general args
 
     pi_post = torch.softmax(logw, dim=1)                # (B,K)
 
+    # --------------------------------------------------
+    # save stats if requested
+    # --------------------------------------------------
+    stats = None
+    if return_stats:
+        B = pi_post.size(0)
+        d = mu_all.size(-1)
+
+        # posterior-weighted mean/var proxies (avoid dependence on sampled k)
+        # E_k[||mu_k||_2]
+        mu_norm_k = torch.norm(mu_all, p=2, dim=-1)  # (B,K)
+        D_mu = (pi_post * mu_norm_k).sum(dim=1).mean()
+
+        # For sigma shift: compare posterior std to prior std per mode
+        # prior std per mode: sigma_list[k]
+        sigma0 = torch.tensor(sigma_list, device=mu_all.device, dtype=mu_all.dtype)  # (K,)
+        sigma0 = sigma0.view(1, K, 1)               # (1,K,1)
+
+        post_std = torch.sqrt(sig_all.clamp_min(1e-12))     # (B,K,d)
+        # L2 norm of (post_std - sigma0) per mode
+        sig_shift_k = torch.norm(post_std - sigma0, p=2, dim=-1)  # (B,K)
+        D_sig = (pi_post * sig_shift_k).sum(dim=1).mean()
+
+        D_proxy = D_mu + D_sig
+
+        # entropy of pi_post (higher = more spread, lower = collapse)
+        pi_entropy = (-pi_post * torch.log(pi_post.clamp_min(1e-12))).sum(dim=1).mean()
+
+        # max weight (higher = more collapse)
+        pi_max = pi_post.max(dim=1).values.mean()
+
+        stats = {
+            "D_mu": D_mu.detach(),
+            "D_sig": D_sig.detach(),
+            "D_proxy": D_proxy.detach(),
+            "pi_entropy": pi_entropy.detach(),
+            "pi_max": pi_max.detach(),
+        }
+    
     # --------------------------------------------------
     # 4) Random sampling from mixture (vectorized)
     # --------------------------------------------------
@@ -206,7 +246,7 @@ def pr_generator(model, x, y, epsilon=8/255, norm="linf", # general args
 
     # build adversarial inputs
     x_adv = torch.clamp(x0_exp + delta, 0.0, 1.0).detach()               # (B, N, C, H, W)
-    return x_adv
+    return x_adv, stats
 
 
 

@@ -40,10 +40,13 @@ class NormalizedModel(nn.Module):
         self.register_buffer("std",  torch.tensor(std,  dtype=torch.float32).view(1, 3, 1, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # return self.backbone(x)
+        # print(f'normalization mean: {self.mean}, std: {self.std}')
         return self.backbone((x - self.mean) / self.std)
+    
 
 
-def build_model(arch: str, num_classes: int, dataset: str) -> nn.Module:
+def build_model(arch: str, num_classes: int, dataset: str, pretrained: bool = False) -> nn.Module:
     """Build a normalized model by architecture name and dataset.
 
     The returned model expects raw [0, 1] inputs and applies the
@@ -56,6 +59,6 @@ def build_model(arch: str, num_classes: int, dataset: str) -> nn.Module:
     arch = arch.lower()
     if arch not in MODEL_REGISTRY:
         raise ValueError(f"Unknown architecture: {arch}. Available: {list(MODEL_REGISTRY.keys())}")
-    backbone = MODEL_REGISTRY[arch](num_classes=num_classes)
+    backbone = MODEL_REGISTRY[arch](num_classes=num_classes, pretrained=pretrained)
     mean, std = get_norm_stats(dataset)
     return NormalizedModel(backbone, mean, std)

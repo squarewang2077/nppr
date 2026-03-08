@@ -12,6 +12,7 @@
 #   - `model_zoo/` for building various model architectures
 
 import os
+import logging
 import argparse
 import time
 import random
@@ -20,15 +21,31 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import Subset
 import torch.backends.cudnn as cudnn
 from tqdm import tqdm
+import pandas as pd
 
 from model_zoo import build_model
 from utils.data_preprocessing import get_dataset, get_img_size
 from utils.adv_attacker import pgd_at_loss, trades_loss
 from utils.pr_generator import pr_generator
-
 from config_fitting import build_sigma_list
+
+def setup_logger(log_path: str) -> logging.Logger:
+    """Return a logger that writes to both stdout and *log_path*."""
+    logger = logging.getLogger("fit_classifiers")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # prevent duplicate output if root logger has handlers
+    fmt = logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    fh = logging.FileHandler(log_path, mode="a")
+    fh.setFormatter(fmt)
+    logger.addHandler(ch)
+    logger.addHandler(fh)
+    return logger
+
 
 def set_seed(seed: int = 42):
     """Make training as deterministic as reasonably possible."""
@@ -39,64 +56,58 @@ def set_seed(seed: int = 42):
     cudnn.deterministic = True
     cudnn.benchmark = False
 
-
-@torch.no_grad()
-def evaluate(model: nn.Module, loader, device) -> float:
-    """Return accuracy on `loader`."""
-    model.eval()
-    correct, total = 0, 0
-    for x, y in loader:
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        pred = model(x).argmax(1)
-        correct += (pred == y).sum().item()
-        total += y.numel()
-    return correct / max(total, 1)
-
-
 # ------------------------------------------------------------------
 #                       Standard Training For One Epoch
 # ------------------------------------------------------------------
 
-def train_one_epoch(model, loader, optimizer, device, criterion, 
+def train_one_epoch(model, loader, optimizer, device, criterion,
                     epoch=None, total_epochs=None):
     """Standard training loop."""
     model.train()
     running_loss = 0.0
+    running_correct = 0
     total_samples = 0
     pbar = tqdm(loader, desc=f"Train Epoch [{epoch}/{total_epochs}]" if epoch else "Training", leave=False)
 
     for x, y in pbar:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        
+
         logits = model(x)
         loss = criterion(logits, y)
-        
+
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item() * y.size(0)
         total_samples += y.size(0)
+
+        with torch.no_grad():
+            preds = logits.argmax(dim=1)
+            running_correct += (preds == y).sum().item()
+
         avg_loss = running_loss / total_samples
+        train_acc = running_correct / total_samples
+        pbar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{train_acc:.4f}")
 
-        pbar.set_postfix(loss=f"{avg_loss:.4f}")
-
-    return running_loss / len(loader.dataset)
+    return running_loss / len(loader.dataset), running_correct / len(loader.dataset)
 
 
 # ------------------------------------------------------------------
 #                    Adversarial Training For One Epoch
 # ------------------------------------------------------------------
 
-def train_one_epoch_adv(model, loader, optimizer, device, criterion, 
-                        adv_config, 
+def train_one_epoch_adv(model, loader, optimizer, device, criterion,
+                        adv_config,
                         epoch=None, total_epochs=None):
     """
     Adversarial training loop (outer loop).
     Inner loop (attack generation) is handled by ad_attacker functions.
+    train_acc is measured on adversarial examples (robust training accuracy).
     """
     model.train()
     running_loss = 0.0
+    running_correct = 0
     total_samples = 0
     pbar = tqdm(loader, desc=f"Adv Train [{epoch}/{total_epochs}]" if epoch else "Adv Training", leave=False)
 
@@ -107,16 +118,15 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
     num_steps = adv_config["num_steps"]
     beta      = adv_config.get("beta", 6.0)  # TRADES only
 
-
     for x, y in pbar:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
 
         # Compute adversarial loss (inner loop + outer loss)
         if adv_type == "adv_pgd":
-            loss, _ = pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion, norm=norm)
+            loss, x_adv = pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion, norm=norm)
         elif adv_type == "trades":
-            loss, _ = trades_loss(model, x, y, epsilon, alpha, num_steps, beta, criterion, norm=norm)
+            loss, x_adv = trades_loss(model, x, y, epsilon, alpha, num_steps, beta, criterion, norm=norm)
         else:
             raise ValueError(f"Unknown adv_type: {adv_type}")
 
@@ -125,11 +135,18 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
 
         running_loss += loss.item() * y.size(0)
         total_samples += y.size(0)
+
+        model.eval()
+        with torch.no_grad():
+            preds = model(x_adv).argmax(dim=1)
+            running_correct += (preds == y).sum().item()
+        model.train()
+
         avg_loss = running_loss / total_samples
+        train_acc = running_correct / total_samples
+        pbar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{train_acc:.4f}")
 
-        pbar.set_postfix(loss=f"{avg_loss:.4f}")
-
-    return running_loss / len(loader.dataset)
+    return running_loss / len(loader.dataset), running_correct / len(loader.dataset)
 
 # ------------------------------------------------------------------
 #                    Probabilistic Training For One Epoch
@@ -159,18 +176,23 @@ def train_one_epoch_pr(model, loader, optimizer, device, criterion,
 
     model.train()
     running_loss = 0.0
+    running_correct = 0
     total_samples = 0
     pbar = tqdm(loader, desc=f"PR Train [{epoch}/{total_epochs}]" if epoch else "PR Training", leave=False)
 
     # Extract generator kwargs (exclude "type")
     generator_kwargs = {k: v for k, v in pr_config.items() if k != "type"}
 
+    # stats accumulators
+    stat_sums = {"D_mu": 0.0, "D_sig": 0.0, "D_proxy": 0.0, "pi_entropy": 0.0, "pi_max": 0.0}
+    stat_count = 0  # number of batches (or you can weight by batch size)
+
     for x, y in pbar:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
 
         # Adversarial beta-mixed loss only
-        x_adv = pr_generator(model, x, y, **generator_kwargs)
+        x_adv, stats = pr_generator(model, x, y, **generator_kwargs, return_stats=True)
 
         # x_adv: (B, N, C, H, W)
         B, N = x_adv.shape[0], x_adv.shape[1]
@@ -184,13 +206,29 @@ def train_one_epoch_pr(model, loader, optimizer, device, criterion,
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item() * y.size(0)
+        running_loss += loss.item() * y_rep.size(0)   # criterion averages over B*N samples
         total_samples += y.size(0)
+
+        # runing correct
+        with torch.no_grad():
+            preds = logits.argmax(dim=1)
+            running_correct += (preds == y_rep).sum().item()
+
+        # accumulate stats (detach already done)
+        for k in stat_sums:
+            stat_sums[k] += float(stats[k].item())
+        stat_count += 1
+
         avg_loss = running_loss / total_samples
+        avg_stats = {k: stat_sums[k] / stat_count for k in stat_sums}
+        train_acc = running_correct / (total_samples * N)
+        
+        pbar.set_postfix(loss=f"{avg_loss:.4f}", 
+                         D=f"{avg_stats['D_proxy']:.3e}", 
+                         Hpi=f"{avg_stats['pi_entropy']:.3f}", 
+                         acc=f"{train_acc:.4f}")
 
-        pbar.set_postfix(loss=f"{avg_loss:.4f}")
-
-    return running_loss / len(loader.dataset)
+    return running_loss / len(loader.dataset), train_acc, avg_stats
 
 # ------------------------------------------------------------------
 #                           Main Function 
@@ -198,7 +236,7 @@ def train_one_epoch_pr(model, loader, optimizer, device, criterion,
 
 def main():
     ap = argparse.ArgumentParser()
-
+    
     # Dataset & model
     ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet"], default="cifar10")
     ap.add_argument("--data_root", type=str, default="./dataset")
@@ -207,15 +245,18 @@ def main():
         "vgg16", "densenet121", "mobilenet_v3_large", "efficientnet_b0",
         "vit_b_16"
     ], default="resnet18")
+    ap.add_argument("--pretrained", action="store_true",
+                    help="Load ImageNet pretrained weights (recommended: use --lr 0.01)")
 
     # General Training Settings
     ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch_size", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=0.01)
+    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=0.1)
+    ap.add_argument("--weight_decay", type=float, default=5e-4)
     ap.add_argument("--img_size", type=int, default=None,
                     help="Input image size (will be resized if dataset images are different)")
     # Training Method  
-    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades", "pr"], default="standard",
+    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades", "pr"], default="pr",
                     help="Training method: standard, adv_pgd (PGD-AT), trades (TRADES), pr (PR)")
     
     # Adversarial Training Settings (for PGD-AT and TRADES)
@@ -231,61 +272,75 @@ def main():
                     help="TRADES regularization weight")
 
     # PR Training Settings (for PR)
-    ap.add_argument("--beta_mix", type=float, default=0.5,
+    ap.add_argument("--beta_mix", type=float, default=1,
                     help="Beta mix parameter for PR")
-    ap.add_argument("--kappa", type=float, default=1.0,
+    ap.add_argument("--kappa", type=float, default=0.02,
                     help="Kappa parameter for PR")
     
-    ap.add_argument("--K", type=int, default=2,
+    ap.add_argument("--K", type=int, default=3,
                     help="Number of mixture components for PR")
-    ap.add_argument("--sigma_dist_type", type=str, default="linear",
+    ap.add_argument("--sigma_dist_type", type=str, default="geometric",
                     help="Type of sigma distribution for PR")
-    ap.add_argument("--fisher_damping", type=float, default=1e-4,
+    ap.add_argument("--fisher_damping", type=float, default=1e-7,
                     help="Fisher diagonal damping for PR")
-    ap.add_argument("--tau", type=float, default=1.0,
+    ap.add_argument("--tau", type=float, default=1e-4,
                     help="Temperature for PR")
 
-    ap.add_argument("--num_samples", type=int, default=10,
+    ap.add_argument("--num_samples", type=int, default=32,
                     help="Number of perturbation samples per input for PR")
     ap.add_argument("--noise_scale", type=float, default=1.0,
                     help="Posterior sampling noise scale for PR")   
 
-
     # Misc
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", type=str, default="cuda")
-    ap.add_argument("--save_dir", type=str, default="./ckp/standard_training",
+    ap.add_argument("--save_dir", type=str, default="./ckp/pr_training",
                     help="Directory to save best checkpoint")
 
     args = ap.parse_args()
+
+    # Deferred import to break the circular dependency:
+    # fit_classifiers -> eva_classifier -> utils -> utils/utils.py -> fit_classifiers
+    from eva_classifier import evaluate, evaluate_with_pr_attack
 
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     img_size = get_img_size(args.dataset, args.img_size)
 
-    # Print config
-    print(f"[config] dataset={args.dataset}, arch={args.arch}")
-    print(f"[config] img_size={img_size}")
+    # Set up output directory and logger early so config lines are captured
+    os.makedirs(args.save_dir, exist_ok=True)
+    log_path = os.path.join(
+        args.save_dir,
+        f"{args.arch.lower()}_{args.dataset.lower()}_{args.training_type}.log"
+    )
+    logger = setup_logger(log_path)
+
+    # Log config
+    logger.info(f"[config] dataset={args.dataset}, arch={args.arch}, pretrained={args.pretrained}")
+    logger.info(f"[config] img_size={img_size}")
     if args.training_type == "standard":
-        print(f"[config] training_type={args.training_type}, no adversarial perturbations")
+        logger.info(f"[config] training_type={args.training_type}, no adversarial perturbations")
     elif args.training_type == "adv_pgd":
-        print(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm} "
-              f"alpha={args.alpha:.4f}, num_steps={args.num_steps}")
+        logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm} "
+                    f"alpha={args.alpha:.4f}, num_steps={args.num_steps}")
     elif args.training_type == "trades":
-        print(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm} "
-              f"alpha={args.alpha:.4f}, num_steps={args.num_steps}, beta={args.beta}")
+        logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm} "
+                    f"alpha={args.alpha:.4f}, num_steps={args.num_steps}, beta={args.beta}")
     elif args.training_type == "pr":
-        print(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm}")
-        print(f"         beta_mix={args.beta_mix}, kappa={args.kappa}")
-        print(f"         K={args.K}, sigma_dist_type={args.sigma_dist_type}, fisher_damping={args.fisher_damping}, tau={args.tau}")
-        print(f"         num_samples={args.num_samples}, noise_scale={args.noise_scale}")   
+        logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm}")
+        logger.info(f"         beta_mix={args.beta_mix}, kappa={args.kappa}")
+        logger.info(f"         K={args.K}, sigma_dist_type={args.sigma_dist_type}, fisher_damping={args.fisher_damping}, tau={args.tau}")
+        logger.info(f"         num_samples={args.num_samples}, noise_scale={args.noise_scale}")
     else:
         raise ValueError(f"Unknown training_type: {args.training_type}")
 
+    # accumulate one dict per evaluation epoch; written to CSV incrementally
+    training_history = []
+
     # Build datasets/loaders
-    train_set, num_classes = get_dataset(args.dataset, args.data_root, True, img_size)
-    test_set, _ = get_dataset(args.dataset, args.data_root, False, img_size)
+    train_set, num_classes = get_dataset(args.dataset, args.data_root, True, img_size, augment=True)
+    test_set, _ = get_dataset(args.dataset, args.data_root, False, img_size, augment=False)
 
     train_loader = torch.utils.data.DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True,
@@ -296,8 +351,26 @@ def main():
         num_workers=4, pin_memory=True
     )
 
+    ## Fixed subset of train set (no augmentation) for per-epoch monitoring ##
+    subset_size = len(test_set) # match the test set size for a fair comparison of train vs test metrics
+    # train_set w/o augmentation to ensure the same samples are selected across epochs and training types
+    train_set_NONaug, _ = get_dataset(args.dataset, args.data_root, True, img_size, augment=False) 
+    rng = np.random.default_rng(seed=args.seed) # for subset selection reproducibility
+    # randomly sample 
+    indices = rng.choice(len(train_set_NONaug), subset_size, replace=False)  
+    train_subset = Subset(train_set_NONaug, indices)
+
+    subtrain_loader = torch.utils.data.DataLoader(
+        train_subset,
+        batch_size=args.batch_size,
+        shuffle=False,  # no need to shuffle the subset loader since it's only for monitoring
+        num_workers=4,
+        pin_memory=True
+    )
+    logger.info(f"[eval] train eval subset: {subset_size}/{len(train_set)} samples ({subset_size/len(train_set)*100:.0f}%, fixed seed)")
+
     # Build model/
-    model = build_model(args.arch, num_classes, args.dataset)
+    model = build_model(args.arch, num_classes, args.dataset, pretrained=args.pretrained)
     model.to(device)
 
     # Optional DataParallel
@@ -306,7 +379,9 @@ def main():
 
     # Loss, optimizer, scheduler
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.SGD(model.parameters(), lr=args.lr,
+                          momentum=0.9, weight_decay=args.weight_decay, nesterov=True)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # Adversarial config
     adv_config = {
@@ -338,28 +413,88 @@ def main():
     }
 
     # Output path
-    os.makedirs(args.save_dir, exist_ok=True)
     out_path = os.path.join(args.save_dir, f"{args.arch.lower()}_{args.dataset.lower()}.pth")
-    print(f"[save] best checkpoint will be written to: {out_path}")
+    logger.info(f"[save] checkpoint -> {out_path}")
+    logger.info(f"[save] log       -> {log_path}")
+    logger.info(f"[save] csv       -> {os.path.join(args.save_dir, f'{args.arch.lower()}_{args.dataset.lower()}_training_info.csv')}")
 
     # Train
-    start = time.time()
-
     for ep in range(1, args.epochs + 1):
+        start = time.time()
         if args.training_type == "standard":
-            train_loss = train_one_epoch(model, train_loader, optimizer, device, criterion,
-                                         epoch=ep, total_epochs=args.epochs)
+            train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, device, criterion,
+                                                    epoch=ep, total_epochs=args.epochs)
         elif args.training_type in ["adv_pgd", "trades"]:
-            train_loss = train_one_epoch_adv(model, train_loader, optimizer, device, criterion, adv_config,
-                                             epoch=ep, total_epochs=args.epochs)
+            train_loss, train_acc = train_one_epoch_adv(model, train_loader, optimizer, device, criterion, adv_config,
+                                                        epoch=ep, total_epochs=args.epochs)
         elif args.training_type == "pr":
-            train_loss = train_one_epoch_pr(model, train_loader, optimizer, device, criterion, pr_config,
-                                             epoch=ep, total_epochs=args.epochs)
+            train_loss, train_acc, avg_stats = train_one_epoch_pr(model, train_loader, optimizer, device, criterion, pr_config,
+                                                                  epoch=ep, total_epochs=args.epochs)
         else:
             raise ValueError(f"Unknown training_type: {args.training_type}")
 
-        acc = evaluate(model, test_loader, device)
-        print(f"[{ep:03d}/{args.epochs}] loss={train_loss:.4f}  val_acc={acc*100:.2f}%")
+        scheduler.step()
+
+        # Evaluation and checkpointing
+        if ep % 5 == 0 or ep == args.epochs:
+            elapsed = time.time() - start
+
+            ## Evaluation on Test set (clean and PR attack) ##
+            val_acc, val_loss = evaluate(model, test_loader, device, criterion)
+            eval_rob_acc, eval_rob_loss = evaluate_with_pr_attack(model, test_loader, device, criterion,
+                                                                pr_generator, generator_kwargs=pr_config,
+                                                                reduce='none')
+            ## Evaluation on Train subset (same size as test set) ##
+            val_acc_T, val_loss_T = evaluate(model, subtrain_loader, device, criterion)
+            eval_rob_acc_T, eval_rob_loss_T = evaluate_with_pr_attack(model, subtrain_loader, device, criterion,
+                                                                pr_generator, generator_kwargs=pr_config,
+                                                                reduce='none')
+
+            current_lr = scheduler.get_last_lr()[0]
+            log_msg = (
+                f"[{ep:03d}/{args.epochs}] "
+                f"lr={current_lr:.5f} "
+                f"time={elapsed:.1f}s "
+                f"train_loss={train_loss:.4f} "
+                f"train_acc={train_acc*100:.2f}% "
+                f"| trainS_loss={val_loss_T:.4f} "
+                f"trainS_acc={val_acc_T*100:.2f}% "
+                f"trainS_rob_loss={eval_rob_loss_T:.4f} "
+                f"trainS_rob_acc={eval_rob_acc_T*100:.2f}% "
+                f"| val_loss={val_loss:.4f} "
+                f"val_acc={val_acc*100:.2f}% "
+                f"rob_loss={eval_rob_loss:.4f} "
+                f"rob_acc={eval_rob_acc*100:.2f}%"
+            )
+            logger.info(log_msg)
+
+            epoch_info = {
+                'arch':            args.arch,
+                'dataset':         args.dataset,
+                'training_type':   args.training_type,
+                'epoch':           ep,
+                'lr':              current_lr,
+                'time':            elapsed,
+                'train_loss':      train_loss,
+                'train_acc':       train_acc,
+                'trainS_loss':     val_loss_T,
+                'trainS_acc':      val_acc_T,
+                'trainS_rob_loss': eval_rob_loss_T,
+                'trainS_rob_acc':  eval_rob_acc_T,
+                'val_loss':        val_loss,
+                'val_acc':         val_acc,
+                'rob_loss':        eval_rob_loss,
+                'rob_acc':         eval_rob_acc,
+            }
+            if args.training_type == "pr":
+                epoch_info.update(avg_stats)
+            training_history.append(epoch_info)
+
+            # overwrite CSV with the full history so far
+            info_csv_path = os.path.join(args.save_dir, f"{args.arch.lower()}_{args.dataset.lower()}_training_info.csv")
+            pd.DataFrame(training_history).to_csv(info_csv_path, index=False)
+            logger.info(f"  -> saved training info to {info_csv_path}")
+    
 
     # Save last checkpoint
     ckpt = {
@@ -376,10 +511,7 @@ def main():
         ckpt["pr_config"] = pr_config
 
     torch.save(ckpt, out_path)
-    print(f"  -> saved last checkpoint to {out_path}")
-
-    elapsed = time.time() - start
-    print(f"Done. last val acc: {acc*100:.2f}%  (time: {elapsed/60:.1f} min)")
+    logger.info(f"  -> saved last checkpoint to {out_path}")
 
 
 if __name__ == "__main__":

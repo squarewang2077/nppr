@@ -37,14 +37,31 @@ def get_img_size(dataset: str, manual_override: int = None) -> int:
     return 32  # CIFAR10/100
 
 
-def get_dataset(name: str, root: str, train: bool, img_size: int):
-    """Build dataset + num_classes."""
+def get_dataset(name: str, root: str, train: bool, img_size: int, augment: bool = True):
+    """Build dataset + num_classes.
+
+    Training transforms (when train=True and augment=True):
+        RandomCrop (with padding) → RandomHorizontalFlip → RandAugment → ToTensor → RandomErasing
+    Test transforms:
+        Resize → ToTensor
+    """
     name = name.lower()
 
-    tf = T.Compose([
-        T.Resize(img_size),
-        T.ToTensor(),           # outputs [0, 1]; normalization is handled inside the model
-    ])
+    if train and augment:
+        padding = max(4, img_size // 8)   # 4 for CIFAR-32, 8 for TinyImageNet-64
+        tf = T.Compose([
+            T.Resize(img_size),
+            T.RandomCrop(img_size, padding=padding, padding_mode="reflect"),
+            T.RandomHorizontalFlip(),
+            T.RandAugment(num_ops=2, magnitude=9),  # AutoAugment-style policy
+            T.ToTensor(),           # outputs [0, 1]; normalization is handled inside the model
+            T.RandomErasing(p=0.25, scale=(0.02, 0.2)),  # occlusion robustness
+        ])
+    else:
+        tf = T.Compose([
+            T.Resize(img_size),
+            T.ToTensor(),           # outputs [0, 1]; normalization is handled inside the model
+        ])
 
     if name == "cifar10":
         ds = dsets.CIFAR10(root=root, train=train, download=True, transform=tf)
