@@ -256,7 +256,7 @@ def main():
     ap.add_argument("--img_size", type=int, default=None,
                     help="Input image size (will be resized if dataset images are different)")
     # Training Method  
-    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades", "pr"], default="pr",
+    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades", "pr"], default="adv_pgd",
                     help="Training method: standard, adv_pgd (PGD-AT), trades (TRADES), pr (PR)")
     
     # Adversarial Training Settings (for PGD-AT and TRADES)
