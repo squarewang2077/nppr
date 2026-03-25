@@ -250,7 +250,7 @@ def main():
 
     # General Training Settings
     ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--lr", type=float, default=0.1)
     ap.add_argument("--weight_decay", type=float, default=5e-4)
     ap.add_argument("--img_size", type=int, default=None,
@@ -294,14 +294,12 @@ def main():
     # Misc
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", type=str, default="cuda")
-    ap.add_argument("--save_dir", type=str, default="./ckp/pr_training",
+    ap.add_argument("--save_dir", type=str, default="./ckp/adv_training",
                     help="Directory to save best checkpoint")
 
     args = ap.parse_args()
 
-    # Deferred import to break the circular dependency:
-    # fit_classifiers -> eva_classifier -> utils -> utils/utils.py -> fit_classifiers
-    from eva_classifier import evaluate, evaluate_with_pr_attack
+    from utils.evaluator import Evaluator
 
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -440,15 +438,19 @@ def main():
             elapsed = time.time() - start
 
             ## Evaluation on Test set (clean and PR attack) ##
-            val_acc, val_loss = evaluate(model, test_loader, device, criterion)
-            eval_rob_acc, eval_rob_loss = evaluate_with_pr_attack(model, test_loader, device, criterion,
-                                                                pr_generator, generator_kwargs=pr_config,
-                                                                reduce='none')
+            pr_kwargs = {k: v for k, v in pr_config.items() if k != "type"}
+            evaluator = Evaluator(model, test_loader, criterion, device)
+            clean = evaluator.evaluate_standard()
+            val_acc, val_loss = clean["acc"], clean["loss"]
+            pr_result = evaluator.evaluate_pr(pr_generator=pr_generator, **pr_kwargs)
+            eval_rob_acc = pr_result["pr"]
+
             ## Evaluation on Train subset (same size as test set) ##
-            val_acc_T, val_loss_T = evaluate(model, subtrain_loader, device, criterion)
-            eval_rob_acc_T, eval_rob_loss_T = evaluate_with_pr_attack(model, subtrain_loader, device, criterion,
-                                                                pr_generator, generator_kwargs=pr_config,
-                                                                reduce='none')
+            evaluator.update_loader(subtrain_loader)
+            clean_T = evaluator.evaluate_standard()
+            val_acc_T, val_loss_T = clean_T["acc"], clean_T["loss"]
+            pr_result_T = evaluator.evaluate_pr(pr_generator=pr_generator, **pr_kwargs)
+            eval_rob_acc_T = pr_result_T["pr"]
 
             current_lr = scheduler.get_last_lr()[0]
             log_msg = (
@@ -459,11 +461,9 @@ def main():
                 f"train_acc={train_acc*100:.2f}% "
                 f"| trainS_loss={val_loss_T:.4f} "
                 f"trainS_acc={val_acc_T*100:.2f}% "
-                f"trainS_rob_loss={eval_rob_loss_T:.4f} "
                 f"trainS_rob_acc={eval_rob_acc_T*100:.2f}% "
                 f"| val_loss={val_loss:.4f} "
                 f"val_acc={val_acc*100:.2f}% "
-                f"rob_loss={eval_rob_loss:.4f} "
                 f"rob_acc={eval_rob_acc*100:.2f}%"
             )
             logger.info(log_msg)
@@ -477,14 +477,12 @@ def main():
                 'time':            elapsed,
                 'train_loss':      train_loss,
                 'train_acc':       train_acc,
-                'trainS_loss':     val_loss_T,
-                'trainS_acc':      val_acc_T,
-                'trainS_rob_loss': eval_rob_loss_T,
-                'trainS_rob_acc':  eval_rob_acc_T,
-                'val_loss':        val_loss,
-                'val_acc':         val_acc,
-                'rob_loss':        eval_rob_loss,
-                'rob_acc':         eval_rob_acc,
+                'trainS_loss':    val_loss_T,
+                'trainS_acc':     val_acc_T,
+                'trainS_rob_acc': eval_rob_acc_T,
+                'val_loss':       val_loss,
+                'val_acc':        val_acc,
+                'rob_acc':        eval_rob_acc,
             }
             if args.training_type == "pr":
                 epoch_info.update(avg_stats)

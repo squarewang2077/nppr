@@ -1,6 +1,6 @@
 #!/bin/bash
-# run_std_train.sh
-# Standard training of ResNet18 / ResNet50 / WideResNet50-2 / VGG16
+# run_training.sh
+# Standard/Adversarial/PR training of ResNet18 / ResNet50 / WideResNet50-2 / VGG16
 # on CIFAR-10, CIFAR-100, and TinyImageNet.
 
 set -euo pipefail
@@ -9,16 +9,16 @@ set -euo pipefail
 # Configurable hyper-parameters
 # ---------------------------------------------------------------------------
 DATA_ROOT="./dataset"
-SAVE_ROOT="./ckp/pr_training"
-EPOCHS=50
-BATCH_SIZE=512
+SAVE_ROOT="./ckp/adv_training"
+EPOCHS=200
+BATCH_SIZE=256
 LR=0.1
 WEIGHT_DECAY=5e-4
 SEED=42
 
 ARCHS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
 DATASETS=("cifar10" "cifar100" "tinyimagenet")
-Training_Type="pr"
+Training_Type="adv_pgd"
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -47,4 +47,4 @@ for DATASET in "${DATASETS[@]}"; do
 done
 
 echo ""
-echo "All standard training runs completed."
+echo "All adversarial training runs completed."
