@@ -1,2 +1,0 @@
-arch,dataset,training_type,ckp_path,test_clean_acc,test_clean_loss,test_clean_time
-resnet18,cifar10,pr,./tests/pr_training/resnet18_cifar10_pr.pth,0.8718,0.37422188448905946,1.8431701130029978

@@ -1,2 +1,0 @@
-arch,dataset,training_type,ckp_path,norm,epsilon,pgd_steps,test_pgd_acc,test_pgd_loss,test_pgd_time,test_cw_acc,test_cw_loss,test_cw_time
-resnet18,cifar10,standard,./tests/standard_training/resnet18_cifar10_standard.pth,linf,0.03137,10,0.0011,12.134071752929687,14.712763896008255,0.0019,3.9007599781036375,14.102281817002222
