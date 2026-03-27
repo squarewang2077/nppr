@@ -1,5 +1,0 @@
-Metric,run_8,run_9,run_10
-Baseline Uniform PR,98.41,97.91,98.01
-Baseline Gaussian PR,98.13,98.13,98.43
-PGD Robust Accuracy,5.16,4.86,4.07
-CW Robust Accuracy,4.67,3.58,3.27
