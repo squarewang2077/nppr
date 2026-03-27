@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,test_clean_acc,test_clean_loss,test_clean_time
+resnet18,cifar10,adv_pgd,./tests/adv_training/resnet18_cifar10_adv_pgd.pth,0.7582,0.7690103697776794,1.8532744310068665

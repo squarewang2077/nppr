@@ -56,7 +56,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from datetime import datetime
-from config import get_config
+from configs.train_gmm_cfg import get_config
 from ar_and_pr.evaluate import evaluate_PGD, evaluate_PR, evaluate_cw
 
 

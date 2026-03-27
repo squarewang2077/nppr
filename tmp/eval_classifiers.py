@@ -7,7 +7,7 @@ import torch
 import torchvision.transforms as T
 
 # Reuse your helper functions from training
-from fit_classifiers import (
+from scripts.train_classifiers import (
     build_model,
     get_dataset,          # (name, root, train, img_size, use_imnet_stats) -> (dataset, num_classes)
     get_norm_stats,       # (dataset, use_imnet_stats) -> (mean, std)
