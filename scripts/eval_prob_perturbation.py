@@ -12,8 +12,7 @@
 #       --dataset cifar10 --arch resnet18 \
 #       --ckp_path ./ckp/pr_training/resnet18_cifar10.pth \
 #       --norm linf --epsilon 0.03137 --num_samples 32 \
-#       --gmm_path ./ckp/gmm/gmm_resnet50_cifar10.pt \
-#       --gmm_feat_arch resnet50
+#       --gmm_path ./ckp/gmm/gmm_resnet50_cifar10.pt
 
 import os
 import time
@@ -90,18 +89,10 @@ def main():
                          "(Gaussian, Uniform, Laplace)")
 
     # ---- GMM PR evaluation ----
-    ap.add_argument("--gmm_path", type=str, default=None,
+    ap.add_argument("--gmm_path", type=str, 
+                    default='./ckp/gmm_fitting/resnet/resnet18_on_cifar10/gmm_K3_cond(x)_decoder(nontrainable)_linf(16)_reg(none).pt',
                     help="Path to a trained GMM4PR checkpoint (.pt). "
                          "When provided, a GMM-based PR evaluation is added.")
-    ap.add_argument("--gmm_feat_arch", type=str, default=None,
-                    choices=[
-                        "resnet18", "resnet50", "wide_resnet50_2",
-                        "vgg16", "densenet121", "mobilenet_v3_large",
-                        "efficientnet_b0", "vit_b_16",
-                    ],
-                    help="Architecture of the feature extractor the GMM was trained with. "
-                         "Required when --gmm_path is set.")
-    ap.add_argument("--gmm_feat_num_classes", type=int, default=None)
     ap.add_argument("--gmm_epsilon", type=float, default=None,
                     help="Override the perturbation radius for GMM evaluation.")
     ap.add_argument("--gmm_norm", type=str, default=None,
@@ -182,25 +173,18 @@ def main():
     _gmm_eval_norm = None
     if args.gmm_path is not None:
         from utils.utils import load_gmm_model
-        if args.gmm_feat_arch is None:
-            raise ValueError(
-                "--gmm_feat_arch is required when --gmm_path is set. "
-                "Specify the architecture the GMM's feature extractor was trained with, "
-                "e.g. --gmm_feat_arch resnet50"
-            )
         print(f"[gmm] loading from: {args.gmm_path}")
         gmm = load_gmm_model(
             args.gmm_path,
             dataset=dataset,
             device=str(device),
-            feat_arch=args.gmm_feat_arch,
-            feat_num_classes=args.gmm_feat_num_classes,
         )
+        _gmm_feat_arch = gmm._feat_arch
         _gmm_eval_eps  = args.gmm_epsilon if args.gmm_epsilon is not None else gmm.budget["eps"]
         _gmm_eval_norm = args.gmm_norm    if args.gmm_norm    is not None else gmm.budget["norm"]
         print(f"[gmm] loaded — K={gmm.K}, latent_dim={gmm.latent_dim}, "
               f"cond_mode={gmm.cond_mode}")
-        print(f"[gmm] feat_arch={args.gmm_feat_arch}  (classifier arch={arch})")
+        print(f"[gmm] feat_arch={_gmm_feat_arch}  (classifier arch={arch})")
         print(f"[gmm] training budget: eps={gmm.budget['eps']:.4f}, norm={gmm.budget['norm']}")
         print(f"[gmm] eval budget:     eps={_gmm_eval_eps:.4f}, norm={_gmm_eval_norm}")
 
@@ -285,7 +269,7 @@ def main():
         # 3. GMM-based PR
         if gmm is not None:
             print(f"[3] PR GMM evaluation  "
-                  f"(N={args.num_samples}, feat={args.gmm_feat_arch}, "
+                  f"(N={args.num_samples}, feat={_gmm_feat_arch}, "
                   f"ε={_gmm_eval_eps:.4f}, norm={_gmm_eval_norm}) ...")
             _t0 = time.perf_counter()
             pr_gmm_res = evaluator.evaluate_pr_gmm(
@@ -318,7 +302,7 @@ def main():
         print(f"  PR random     : N={args.num_samples}, dists=gaussian,uniform,laplace")
     if gmm is not None:
         print(f"  PR GMM        : N={args.num_samples}, K={gmm.K}, "
-              f"cond={gmm.cond_mode}, feat={args.gmm_feat_arch}")
+              f"cond={gmm.cond_mode}, feat={_gmm_feat_arch}")
         print(f"                  train budget: eps={gmm.budget['eps']:.4f}, "
               f"norm={gmm.budget['norm']}")
         print(f"                  eval  budget: eps={_gmm_eval_eps:.4f}, "

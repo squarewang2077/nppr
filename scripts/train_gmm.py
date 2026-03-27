@@ -19,14 +19,10 @@ from torch import optim
 from tqdm import tqdm
 
 # Import your classes and utilities
-from configs.train_gmm_cfg import get_config, list_configs
-from utils import (
-    GMM4PR,
-    get_dataset, build_model, eval_acc,
-    initialize_gmm_parameters, 
-    TemperatureScheduler, check_mode_collapse,
-    build_decoder
-)
+from configs.train_gmm_cfg import get_config, list_configs, initialize_gmm_parameters, TemperatureScheduler
+from src.gmm4pr import GMM4PR, build_decoder_from_flag as build_decoder
+from arch import build_model, build_feat_extractor
+from utils import get_dataset_with_index, check_mode_collapse
 
 
 def main():
@@ -45,6 +41,7 @@ def main():
     parser.add_argument("--batch_size", type=int, help="Override batch size")
     parser.add_argument("--device", type=str, help="Override device")
     parser.add_argument("--clf_ckpt", type=str, help="Override classifier checkpoint path")
+    parser.add_argument("--ckp_dir", type=str, help="Override checkpoint save directory")
     
     args = parser.parse_args()
     
@@ -67,6 +64,8 @@ def main():
         cfg.device = args.device
     if args.clf_ckpt is not None:
         cfg.clf_ckpt = args.clf_ckpt
+    if args.ckp_dir is not None:
+        cfg.ckp_dir = args.ckp_dir
     
     # Print configuration
     print(cfg)
@@ -86,7 +85,7 @@ def main():
     
     # Load dataset
     print(f"\nLoading dataset: {cfg.dataset}")
-    dataset, num_classes, out_shape = get_dataset(cfg.dataset, cfg.data_root, train=True, resize=cfg.resize) # training set
+    dataset, num_classes, out_shape = get_dataset_with_index(cfg.dataset, cfg.data_root, train=True, resize=cfg.resize) # training set
     loader = torch.utils.data.DataLoader(
         dataset, 
         batch_size=cfg.batch_size,
@@ -98,23 +97,24 @@ def main():
 
     # ============ LOAD CLASSIFIER ============
     print(f"\nLoading classifier: {cfg.arch}")
-    model, feat_extractor = build_model(cfg.arch, num_classes, device)
-    
+    model = build_model(cfg.arch, num_classes, cfg.dataset)
+
     if not os.path.isfile(cfg.clf_ckpt):
         raise FileNotFoundError(f"Classifier not found: {cfg.clf_ckpt}")
-    
+
     state = torch.load(cfg.clf_ckpt, map_location="cpu")
     state = state.get("state_dict", state.get("model_state", state))
     state = {k.replace("module.", ""): v for k, v in state.items()}
-    
+
     model.load_state_dict(state, strict=False)
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad = False
-    
-    feat_extractor = feat_extractor.to(device).eval()
-    for p in feat_extractor.parameters():
-        p.requires_grad = False
+
+    # Build feat_extractor from model's loaded backbone so they share the same
+    # parameter objects — no separate weight loading needed.
+    feat_extractor = build_feat_extractor(cfg.arch, num_classes, cfg.dataset,
+                                          backbone=model.backbone)
         
     # Check parameter sharing
     model_params = {id(p) for p in model.parameters()}
@@ -127,9 +127,6 @@ def main():
     else:
         print("[check] No shared parameters.")
 
-    print("Evaluating clean accuracy...")
-    eval_acc(model, dataset, device) # accuracy on training set
-    
     # ============ INITIALIZE GMM ============
     print(f"\nInitializing GMM: K={cfg.K}, D={cfg.latent_dim}, cond={cfg.cond_mode}")
     gmm = GMM4PR(
@@ -237,7 +234,7 @@ def main():
         # Cosine annealing scheduler: decrease LR from initial to min
         cosine_scheduler = CosineAnnealingLR(
             optimizer,
-            T_max=cfg.epochs - cfg.lr_warmup_epochs,  # Remaining epochs after warmup
+            T_max=max(cfg.epochs - cfg.lr_warmup_epochs, 1),  # Remaining epochs after warmup
             eta_min=cfg.lr_min
         )
 
@@ -275,7 +272,7 @@ def main():
         
         # Compute Gumbel temperature (optional annealing)
         if hasattr(cfg, 'use_gumbel_anneal') and cfg.use_gumbel_anneal:
-            alpha = (epoch - 1) / (cfg.epochs - 1)
+            alpha = (epoch - 1) / max(cfg.epochs - 1, 1)
             gumbel_temp = cfg.gumbel_temp_init + alpha * (cfg.gumbel_temp_final - cfg.gumbel_temp_init)
         else:
             gumbel_temp = cfg.gumbel_temp_final  # Fixed temperature
@@ -396,6 +393,7 @@ def main():
         # Check mode collapse
         if epoch % cfg.check_collapse_every == 0:
             stats = check_mode_collapse(gmm, loader, device)
+            gmm.train()
             collapse_log.append({
                 'epoch': epoch,
                 'max_pi': stats['max_pi'],

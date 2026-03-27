@@ -1,5 +1,1 @@
-{
-    "python.analysis.extraPaths": [
-        "./FrEIA/FrEIA/distributions"
-    ]
-}
+{}

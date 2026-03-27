@@ -8,9 +8,13 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
+            "program": "${workspaceFolder}/scripts/eval_prob_perturbation.py",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
             "console": "integratedTerminal",
-            "justMyCode": false
+            "justMyCode": true
         },
 
     ]

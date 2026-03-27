@@ -146,7 +146,7 @@ class Config(BasicConfig):
 
     # Training Hyperparameters
     epochs: int = 50  
-    batch_size: int = 128  
+    batch_size: int = 256  
     batch_index_max: int = float("inf")  # For debugging, limit number of batches per epoch 
     
     lr: float = 5e-4

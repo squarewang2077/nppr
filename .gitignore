@@ -6,3 +6,6 @@ ckp/*
 plots/*
 results/*
 tmp/*
+tests/standard_training/*
+tests/adv_training/*
+tests/pr_training/*

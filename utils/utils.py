@@ -135,15 +135,15 @@ def load_gmm_model(gmm_path, dataset, device="cuda",
                            stats when building the feat_extractor.
         device           : Target device string ("cuda" or "cpu").
         feat_arch        : Architecture of the feature extractor that the GMM was
-                           trained with (e.g. "resnet50").  Required — there is no
-                           safe default because the GMM's latent space depends on
-                           this backbone.
+                           trained with (e.g. "resnet50").  When None, inferred
+                           from the checkpoint's stored config.
         feat_num_classes : Number of classes used when the feat_extractor backbone
                            was built.  Defaults to the value stored in the GMM
                            checkpoint (cfg["num_cls"]) when None.
 
     Returns:
-        gmm : GMM4PR instance in eval mode with all parameters frozen.
+        gmm : GMM4PR instance in eval mode, all parameters frozen.
+              The resolved feat_arch is stored as ``gmm._feat_arch``.
     """
     # Lazy imports to avoid circular dependencies at module load time
     from src.gmm4pr import GMM4PR
@@ -152,30 +152,54 @@ def load_gmm_model(gmm_path, dataset, device="cuda",
     if not os.path.isfile(gmm_path):
         raise FileNotFoundError(f"GMM checkpoint not found: {gmm_path}")
 
-    if feat_arch is None:
-        raise ValueError(
-            "feat_arch is required for load_gmm_model. "
-            "Specify the architecture the GMM's feature extractor was trained with "
-            "(e.g. feat_arch='resnet50')."
-        )
+    # Load checkpoint config once to resolve any missing arguments
+    _ckpt_cfg = torch.load(gmm_path, map_location="cpu", weights_only=False)["config"]
+    _nested_cfg = _ckpt_cfg.get("config", {})
 
-    # Resolve feat_num_classes from the checkpoint when not explicitly given
+    # Resolve feat_arch: try top-level key first (future saves), then
+    # the nested training config written by train_gmm.py (existing saves).
+    if feat_arch is None:
+        feat_arch = _ckpt_cfg.get("feat_arch") or _nested_cfg.get("arch")
+        if feat_arch is None:
+            raise ValueError(
+                "feat_arch could not be inferred from the checkpoint. "
+                "Please pass feat_arch explicitly."
+            )
+
+    # Resolve feat_num_classes from num_cls stored in the checkpoint
     if feat_num_classes is None:
-        _cfg = torch.load(gmm_path, map_location="cpu", weights_only=False)["config"]
-        feat_num_classes = _cfg.get("num_cls")
+        feat_num_classes = _ckpt_cfg.get("num_cls")
         if feat_num_classes is None:
             raise ValueError(
                 "feat_num_classes could not be inferred from the checkpoint. "
-                "Please pass it explicitly."
+                "Please pass feat_num_classes explicitly."
             )
 
     feat_extractor = build_feat_extractor(feat_arch, feat_num_classes, dataset).to(device).eval()
     for p in feat_extractor.parameters():
         p.requires_grad_(False)
 
+    # Rebuild the decoder (upsampler) if it was used during training.
+    # Non-trainable decoders have no weights in the state_dict so they must
+    # be reconstructed from the stored training config.
+    up_sampler = None
+    if _nested_cfg.get("use_decoder"):
+        from src.gmm4pr import build_decoder_from_flag
+        from utils.preprocess_data import get_img_size
+        _decoder_backend = _nested_cfg["decoder_backend"]
+        _resize = _nested_cfg.get("resize") or None
+        _img_size = get_img_size(dataset, _resize)
+        _out_shape = (3, _img_size, _img_size)
+        up_sampler = build_decoder_from_flag(
+            _decoder_backend, _ckpt_cfg["latent_dim"], _out_shape, device
+        )
+        for p in up_sampler.parameters():
+            p.requires_grad_(False)
+
     gmm = GMM4PR.load_from_checkpoint(
         gmm_path,
         feat_extractor=feat_extractor,
+        up_sampler=up_sampler,
         map_location=device,
         strict=True,
     )
@@ -183,6 +207,7 @@ def load_gmm_model(gmm_path, dataset, device="cuda",
     for p in gmm.parameters():
         p.requires_grad_(False)
 
+    gmm._feat_arch = feat_arch
     return gmm
 
 

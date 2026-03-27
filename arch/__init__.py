@@ -62,7 +62,8 @@ def build_model(arch: str, num_classes: int, dataset: str, pretrained: bool = Fa
     return NormalizedModel(backbone, mean, std)
 
 
-def build_feat_extractor(arch: str, num_classes: int, dataset: str) -> nn.Module:
+def build_feat_extractor(arch: str, num_classes: int, dataset: str,
+                         backbone=None) -> nn.Module:
     """Build a feature extractor (backbone minus classification head).
 
     The feature extractor outputs a flat feature vector for each input image.
@@ -71,13 +72,19 @@ def build_feat_extractor(arch: str, num_classes: int, dataset: str) -> nn.Module
         arch:        Architecture name (must be a key in MODEL_REGISTRY).
         num_classes: Number of output classes for the backbone.
         dataset:     Dataset name used to look up normalization statistics.
+        backbone:    Optional pre-built backbone to use directly.  When
+                     provided (e.g. ``model.backbone`` after loading weights),
+                     the returned extractor shares the same parameter objects
+                     as that backbone — no separate weight loading needed.
+                     When None, a fresh backbone is built from scratch.
 
     Returns:
         feat_extractor: headless backbone as an nn.Module.
     """
     arch = arch.lower()
 
-    backbone = build_model(arch=arch, num_classes=num_classes, dataset=dataset).backbone
+    if backbone is None:
+        backbone = build_model(arch=arch, num_classes=num_classes, dataset=dataset).backbone
 
     if arch == "resnet18":
         return nn.Sequential(*list(backbone.children())[:-1], nn.Flatten())
