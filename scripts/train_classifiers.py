@@ -366,7 +366,7 @@ def main():
     ap.add_argument("--tau", type=float, default=1e-4,
                     help="Temperature for PR")
 
-    ap.add_argument("--num_samples", type=int, default=32,
+    ap.add_argument("--num_samples", type=int, default=3,
                     help="Number of perturbation samples per input for PR")
     ap.add_argument("--noise_scale", type=float, default=1.0,
                     help="Posterior sampling noise scale for PR")   
