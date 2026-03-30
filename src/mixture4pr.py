@@ -32,10 +32,11 @@ PerturbationModel  (nn.Module, inherits MixedNoiseDistribution)
 │   │
 │   └── NoiseComponent  (nn.Module, ABC)
 │       One component family in the K-component mixture.
-│       Three built-in implementations:
-│         GaussianComponent  — diagonal / low-rank / full covariance
-│         LaplaceComponent   — diagonal independent Laplace
-│         UniformComponent   — symmetric uniform half-width
+│       Four built-in implementations:
+│         GaussianComponent       — diagonal / low-rank / full covariance
+│         LaplaceComponent        — diagonal independent Laplace
+│         UniformComponent        — symmetric uniform half-width
+│         SaltAndPepperComponent  — per-dim spike at ±amplitude with prob p
 │
 ├── PerturbationDecoder  (plain Python class, not nn.Module)
 │   Decodes a flat latent vector into a shaped delta and projects it
@@ -499,13 +500,169 @@ class UniformComponent(NoiseComponent):
 
 
 # --------------------------------------------------
-#    Component Registry (checkpoint loading only) 
+#               SaltAndPepperComponent
+# --------------------------------------------------
+
+class SaltAndPepperComponent(NoiseComponent):
+    """
+    Salt-and-pepper noise components.
+
+    Each latent dimension independently takes one of three outcomes centred on
+    the component mean ``mu_d``:
+
+      * **salt**   (+amplitude) with probability  p/2
+      * **pepper** (-amplitude) with probability  p/2
+      * **clean**  (no change)  with probability  1 - p
+
+    Both ``p`` (corruption rate) and ``amplitude`` are learnable, per-component
+    and per-dimension, parameterised as::
+
+        p   = sigmoid(logit_p)          ∈ (0, 1)
+        amp = exp(log_amplitude)        > 0
+
+    Sampling uses a Gumbel-Softmax relaxation over the three discrete outcomes
+    so that gradients flow through the amplitude and probability parameters
+    during training.  Temperature controls the sharpness of the relaxation.
+
+    Parameters
+    ----------
+    K : int
+        Number of salt-and-pepper components.
+    latent_dim : int
+    device : str or torch.device
+    logit_p_bounds : (float, float)
+        Clamp range for the logit of the corruption probability.
+        Default ``(-4.0, 4.0)`` keeps p safely in (0.018, 0.982).
+    log_amplitude_bounds : (float, float)
+        Clamp range for the log-amplitude.
+        Default ``(-3.0, 1.0)`` keeps amplitude in (exp(-3), exp(1)).
+    temperature : float
+        Gumbel-Softmax temperature for ``rsample``.  Lower values produce
+        harder (more spike-like) samples; higher values produce softer
+        convex combinations.  Default ``0.5``.
+    """
+
+    registry_name = "salt_and_pepper"
+
+    def __init__(self, K: int, latent_dim: int, device,
+                 logit_p_bounds: tuple = (-4.0, 4.0),
+                 log_amplitude_bounds: tuple = (-3.0, 1.0),
+                 temperature: float = 0.5):
+        super().__init__(K, latent_dim, device)
+        self.logit_p_bounds = logit_p_bounds
+        self.log_amplitude_bounds = log_amplitude_bounds
+        self.temperature = temperature
+        self._conditional = False
+
+    def get_config(self) -> dict:
+        return {
+            "logit_p_bounds":      self.logit_p_bounds,
+            "log_amplitude_bounds": self.log_amplitude_bounds,
+            "temperature":         self.temperature,
+        }
+
+    def build_unconditional_params(self) -> None:
+        self._conditional = False
+        K, D = self.K, self.latent_dim
+        # Initialise logit_p at 0 → p ≈ 0.5 (moderate corruption rate)
+        self.logit_p      = nn.Parameter(torch.zeros(K, D, device=self.device))
+        self.log_amplitude = nn.Parameter(torch.zeros(K, D, device=self.device))
+
+    def build_conditional_heads(self, hidden_dim: int) -> None:
+        self._conditional = True
+        K, D = self.K, self.latent_dim
+        self.logit_p_head       = nn.Linear(hidden_dim, K * D).to(self.device)
+        self.log_amplitude_head = nn.Linear(hidden_dim, K * D).to(self.device)
+
+    def get_scale_params(self, h: Optional[torch.Tensor], B: int) -> dict:
+        K, D = self.K, self.latent_dim
+        lo_p, hi_p = self.logit_p_bounds
+        lo_a, hi_a = self.log_amplitude_bounds
+
+        if self._conditional:
+            logit_p = self.logit_p_head(h).view(B, K, D)
+            log_amp = self.log_amplitude_head(h).view(B, K, D)
+        else:
+            logit_p = self.logit_p.unsqueeze(0).expand(B, K, D)
+            log_amp = self.log_amplitude.unsqueeze(0).expand(B, K, D)
+
+        return {
+            "p":   torch.sigmoid(torch.clamp(logit_p, lo_p, hi_p)),  # [B, K, D]
+            "amp": torch.exp(torch.clamp(log_amp, lo_a, hi_a)),       # [B, K, D]
+        }
+
+    def rsample(self, mu: torch.Tensor, scale_params: dict,
+                num_samples: int) -> torch.Tensor:
+        """
+        Differentiable sample via Gumbel-Softmax over {-amp, 0, +amp}.
+
+        Returns
+        -------
+        Tensor[S, B, K, D]
+        """
+        p   = scale_params["p"]    # [B, K, D]
+        amp = scale_params["amp"]  # [B, K, D]
+        B, K, D = mu.shape
+
+        # Build 3-outcome probability vector: [pepper, clean, salt]
+        half_p = p / 2.0
+        probs  = torch.stack([half_p, 1.0 - p, half_p], dim=-1)          # [B, K, D, 3]
+        spikes = torch.stack([-amp, torch.zeros_like(amp), amp], dim=-1)  # [B, K, D, 3]
+
+        # Expand along sample dimension
+        probs_exp  = probs.unsqueeze(0).expand(num_samples, B, K, D, 3)   # [S, B, K, D, 3]
+        spikes_exp = spikes.unsqueeze(0).expand(num_samples, B, K, D, 3)  # [S, B, K, D, 3]
+
+        # Gumbel-Softmax relaxation
+        log_probs = torch.log(probs_exp.clamp(min=1e-20))
+        gumbel    = -torch.log(-torch.log(
+            torch.rand_like(log_probs).clamp(min=1e-20)
+        ))
+        weights = F.softmax((log_probs + gumbel) / self.temperature, dim=-1)  # [S, B, K, D, 3]
+
+        noise = (weights * spikes_exp).sum(dim=-1)   # [S, B, K, D]
+        return mu.unsqueeze(0) + noise               # [S, B, K, D]
+
+    def log_prob(self, x: torch.Tensor, mu: torch.Tensor,
+                 scale_params: dict) -> torch.Tensor:
+        """
+        Log probability under the per-dimension 3-point discrete distribution,
+        approximated with narrow Gaussians centred at each spike.
+
+        Returns
+        -------
+        Tensor[B, K]
+        """
+        p   = scale_params["p"]    # [B, K, D]
+        amp = scale_params["amp"]  # [B, K, D]
+        x_exp = x.unsqueeze(1).expand_as(mu)  # [B, K, D]
+        diff  = x_exp - mu                    # [B, K, D]
+
+        # Narrow Gaussian bandwidth to approximate the discrete spikes
+        tiny = torch.full_like(amp, 1e-3)
+        log_p_salt   = Normal( amp,               tiny).log_prob(diff)
+        log_p_pepper = Normal(-amp,               tiny).log_prob(diff)
+        log_p_clean  = Normal(torch.zeros_like(amp), tiny).log_prob(diff)
+
+        half_p = p / 2.0
+        log_p = torch.log(
+            half_p    * torch.exp(log_p_salt)   +
+            half_p    * torch.exp(log_p_pepper) +
+            (1.0 - p) * torch.exp(log_p_clean)  +
+            1e-40
+        )
+        return log_p.sum(dim=-1)  # [B, K]
+
+
+# --------------------------------------------------
+#    Component Registry (checkpoint loading only)
 # --------------------------------------------------
 
 _NOISE_REGISTRY: dict = {
-    "gaussian": GaussianComponent,
-    "laplace":  LaplaceComponent,
-    "uniform":  UniformComponent,
+    "gaussian":        GaussianComponent,
+    "laplace":         LaplaceComponent,
+    "uniform":         UniformComponent,
+    "salt_and_pepper": SaltAndPepperComponent,
 }
 
 

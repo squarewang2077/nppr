@@ -10,6 +10,7 @@ Usage:
 import os
 import random
 import argparse
+from xml.parsers.expat import model
 import numpy as np
 import torch
 import torch.nn as nn
@@ -22,18 +23,18 @@ from tqdm import tqdm
 from configs.train_gmm_cfg import get_config, list_configs, initialize_gmm_parameters, TemperatureScheduler
 from src.gmm4pr import GMM4PR, build_decoder_from_flag as build_decoder
 from arch import build_model, build_feat_extractor
-from utils import get_dataset_with_index, check_mode_collapse
+from utils import get_dataset, get_img_size, check_mode_collapse
 
 
 def main():
     # ============ PARSE ARGUMENTS ============
     parser = argparse.ArgumentParser(description="GMM4PR Training")
     
-    # Config selection
-    parser.add_argument("--config", type=str, default="mobilenet_on_cifar10",
-                       help="Config name from config.py")
-    parser.add_argument("--list-configs", action="store_true", default=False, # false for debug
-                       help="List all available configs and exit")
+    # Config selection (deprecated - use command-line args instead)
+    parser.add_argument("--config", type=str, default=None,
+                       help="[Deprecated] Config name - use command-line args instead")
+    parser.add_argument("--list-configs", action="store_true", default=False,
+                       help="List configuration info and exit")
     
     # Quick overrides (optional)
     parser.add_argument("--epochs", type=int, help="Override epochs")
@@ -42,6 +43,8 @@ def main():
     parser.add_argument("--device", type=str, help="Override device")
     parser.add_argument("--clf_ckpt", type=str, help="Override classifier checkpoint path")
     parser.add_argument("--ckp_dir", type=str, help="Override checkpoint save directory")
+    parser.add_argument("--dataset", type=str, help="Override dataset (cifar10, cifar100, tinyimagenet)")
+    parser.add_argument("--arch", type=str, help="Override architecture (resnet18, resnet50, wide_resnet50_2)")
     
     args = parser.parse_args()
     
@@ -66,6 +69,16 @@ def main():
         cfg.clf_ckpt = args.clf_ckpt
     if args.ckp_dir is not None:
         cfg.ckp_dir = args.ckp_dir
+    if args.dataset is not None:
+        cfg.dataset = args.dataset
+    if args.arch is not None:
+        cfg.arch = args.arch
+
+    # Auto-generate experiment name based on configuration
+    cfg.exp_name = (f"K{cfg.K}_cond({cfg.cond_mode})_"
+                   f"decoder({cfg.decoder_backend})_"
+                   f"{cfg.norm}({cfg.epsilon:.3f})_"
+                   f"epochs{cfg.epochs}")
     
     # Print configuration
     print(cfg)
@@ -85,13 +98,17 @@ def main():
     
     # Load dataset
     print(f"\nLoading dataset: {cfg.dataset}")
-    dataset, num_classes, out_shape = get_dataset_with_index(cfg.dataset, cfg.data_root, train=True, resize=cfg.resize) # training set
+    img_size = get_img_size(cfg.dataset, manual_override=224 if cfg.resize else None)
+    dataset, num_classes = get_dataset(cfg.dataset, cfg.data_root, train=True, img_size=img_size, augment=False) # training set
+    # Determine output shape
+    channels = 1 if cfg.dataset.lower() == 'mnist' else 3
+    out_shape = (channels, img_size, img_size)
     loader = torch.utils.data.DataLoader(
-        dataset, 
+        dataset,
         batch_size=cfg.batch_size,
-        shuffle=False, 
-        num_workers=cfg.num_workers, 
-        pin_memory=True 
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=True
     )
     print(f"Dataset: {len(dataset)} samples, {num_classes} classes, shape={out_shape}")
 
@@ -107,7 +124,8 @@ def main():
     state = {k.replace("module.", ""): v for k, v in state.items()}
 
     model.load_state_dict(state, strict=False)
-    model = model.to(device).eval()
+    model = model.to(device)
+    model.eval()
     for p in model.parameters():
         p.requires_grad = False
 
@@ -157,7 +175,7 @@ def main():
     feat_dim = None
     if cfg.cond_mode in ("x", "xy"):
         with torch.no_grad():
-            x0, _, _ = next(iter(loader))
+            x0, _ = next(iter(loader))
             feat_dim = feat_extractor(x0.to(device)).view(x0.size(0), -1).size(1)
         print(f"Feature dimension: {feat_dim}")
     
@@ -262,6 +280,8 @@ def main():
                  } # To store loss history
 
     gmm.train()
+    model.eval()
+    gmm.feat_extractor.eval()  # Ensure feature extractor is in eval mode if used
     print(f"\n{'='*60}")
     print(f"Starting training: {cfg.epochs} epochs")
     print(f"{'='*60}\n")
@@ -292,18 +312,21 @@ def main():
         acc_counter = 0
         optimizer.zero_grad(set_to_none=True)
         
-        for batch_idx, (x, y, _) in enumerate(pbar):
+        for batch_idx, (x, y) in enumerate(pbar):
             if batch_idx >= cfg.batch_index_max: # this line added for testing 
                 break
             x, y = x.to(device), y.to(device)
             
+            ### Debugging checks for training mode ###
+            # print(f"GMM training: {gmm.training}")
+            # print(f"Model training: {model.training}")
+            # print(f"Feat Extractor training: {gmm.feat_extractor.training}")
+            ### End of debugging checks ###
+
             # Only use correctly classified samples
             with torch.no_grad():
-                model.eval()
                 pred = model(x).argmax(1)
                 mask = (pred == y).tolist()
-                # debug_mask = [False] * 256
-                # debug_mask[0] = True
                 if sum(mask) == 0:
                     continue                
             x_clean = x[mask] 

@@ -13,17 +13,20 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 # ---------------------------------------------------------------------------
 # Configurable hyper-parameters
 # ---------------------------------------------------------------------------
+GPU_ID=1                    # GPU device ID to use (change this to 0, 1, 3, etc.)
+export CUDA_VISIBLE_DEVICES=${GPU_ID}
+
 DATA_ROOT="./dataset"
-EPOCHS=200
+EPOCHS=50
 BATCH_SIZE=4096
-LR=0.01
+LR=0.1
 WEIGHT_DECAY=5e-4
 SEED=42
 
-# ARCHS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
-ARCHS=("vgg16")
+ARCHS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
+# ARCHS=("vgg16")
 DATASETS=("cifar10" "cifar100" "tinyimagenet")
-TRAINING_TYPE="adv_pgd"     # standard | adv_pgd | trades | pr
+TRAINING_TYPE="standard"     # standard | adv_pgd | trades | pr
 
 # Adversarial / PR attack budget (used by adv_pgd, trades, and pr)
 NORM="linf"
@@ -37,6 +40,12 @@ SAVE_ROOT="./ckp/${TRAINING_TYPE}"
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
+echo "======================================================"
+echo "  Using GPU: ${GPU_ID}"
+echo "  Training Type: ${TRAINING_TYPE}"
+echo "======================================================"
+echo ""
+
 for DATASET in "${DATASETS[@]}"; do
     for ARCH in "${ARCHS[@]}"; do
         SAVE_DIR="${SAVE_ROOT}/${DATASET}"

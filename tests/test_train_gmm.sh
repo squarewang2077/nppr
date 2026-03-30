@@ -20,18 +20,18 @@ python scripts/train_gmm.py \
     --config resnet18_on_cifar10_linf \
     --clf_ckpt ./tests/standard_training/resnet18_cifar10_standard.pth \
     --ckp_dir ./tests/standard_training/by_gmm \
-    --epochs 30 --K 3
+    --epochs 5 --K 3
 
-# 2. GMM trained on top of the PGD adversarially-trained classifier
-python scripts/train_gmm.py \
-    --config resnet18_on_cifar10_linf \
-    --clf_ckpt ./tests/adv_training/resnet18_cifar10_adv_pgd.pth \
-    --ckp_dir ./tests/adv_training/by_gmm \
-    --epochs 30 --K 3
+# # 2. GMM trained on top of the PGD adversarially-trained classifier
+# python scripts/train_gmm.py \
+#     --config resnet18_on_cifar10_linf \
+#     --clf_ckpt ./tests/adv_training/resnet18_cifar10_adv_pgd.pth \
+#     --ckp_dir ./tests/adv_training/by_gmm \
+#     --epochs 5 --K 3
 
-# 3. GMM trained on top of the PR-trained classifier
-python scripts/train_gmm.py \
-    --config resnet18_on_cifar10_linf \
-    --clf_ckpt ./tests/pr_training/resnet18_cifar10_pr.pth \
-    --ckp_dir ./tests/pr_training/by_gmm \
-    --epochs 30 --K 3
+# # 3. GMM trained on top of the PR-trained classifier
+# python scripts/train_gmm.py \
+#     --config resnet18_on_cifar10_linf \
+#     --clf_ckpt ./tests/pr_training/resnet18_cifar10_pr.pth \
+#     --ckp_dir ./tests/pr_training/by_gmm \
+#     --epochs 5 --K 3

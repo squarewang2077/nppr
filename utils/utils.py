@@ -180,21 +180,46 @@ def load_gmm_model(gmm_path, dataset, device="cuda",
         p.requires_grad_(False)
 
     # Rebuild the decoder (upsampler) if it was used during training.
-    # Non-trainable decoders have no weights in the state_dict so they must
-    # be reconstructed from the stored training config.
+    # Try to infer from:
+    # 1. Explicit config flag (if saved)
+    # 2. Presence of up_sampler weights in state_dict
+    # 3. Decoder backend from checkpoint filename or config
     up_sampler = None
-    if _nested_cfg.get("use_decoder"):
+    _use_decoder = _nested_cfg.get("use_decoder", False)
+
+    # Check if up_sampler weights exist in checkpoint state_dict
+    _state_dict_keys = torch.load(gmm_path, map_location="cpu", weights_only=False)["state_dict"].keys()
+    _has_decoder_weights = any("up_sampler" in k for k in _state_dict_keys)
+
+    if _use_decoder or _has_decoder_weights:
         from src.gmm4pr import build_decoder_from_flag
         from utils.preprocess_data import get_img_size
-        _decoder_backend = _nested_cfg["decoder_backend"]
-        _resize = _nested_cfg.get("resize") or None
-        _img_size = get_img_size(dataset, _resize)
-        _out_shape = (3, _img_size, _img_size)
-        up_sampler = build_decoder_from_flag(
-            _decoder_backend, _ckpt_cfg["latent_dim"], _out_shape, device
-        )
-        for p in up_sampler.parameters():
-            p.requires_grad_(False)
+
+        # Try to get decoder backend from config, or infer from checkpoint filename
+        _decoder_backend = _nested_cfg.get("decoder_backend")
+        if _decoder_backend is None and _has_decoder_weights:
+            # Try to infer from checkpoint filename (e.g., "decoder(bicubic_trainable)")
+            import re
+            _exp_name = _nested_cfg.get("exp_name", "") or os.path.basename(gmm_path)
+            _match = re.search(r'decoder\(([^)]+)\)', _exp_name)
+            if _match:
+                _decoder_backend = _match.group(1)
+            else:
+                raise ValueError(
+                    f"Checkpoint contains decoder weights but decoder_backend cannot be inferred. "
+                    f"Found state_dict keys: {[k for k in _state_dict_keys if 'up_sampler' in k]}"
+                )
+
+        if _decoder_backend:
+            _resize = _nested_cfg.get("resize") or None
+            _img_size = get_img_size(dataset, _resize)
+            _out_shape = (3, _img_size, _img_size)
+            up_sampler = build_decoder_from_flag(
+                _decoder_backend, _ckpt_cfg["latent_dim"], _out_shape, device
+            )
+            for p in up_sampler.parameters():
+                p.requires_grad_(False)
+            print(f"[gmm] Reconstructed decoder: {_decoder_backend}")
 
     gmm = GMM4PR.load_from_checkpoint(
         gmm_path,
@@ -312,7 +337,7 @@ def check_mode_collapse(gmm, loader, device, num_batches=10):
     try:
         pi_distributions = []
 
-        for i, (x, y, _) in enumerate(loader):
+        for i, (x, y) in enumerate(loader):
             if i >= num_batches:
                 break
             x, y = x.to(device), y.to(device)
@@ -356,3 +381,61 @@ def check_mode_collapse(gmm, loader, device, num_batches=10):
     finally:
         # Always restore training mode, even if an exception occurs
         gmm.train()
+
+
+# ------------------------------------------------------------------
+#   Helper function to build sigma_list for GMM prior
+# ------------------------------------------------------------------
+
+def build_sigma_list(
+    epsilon: float,
+    K: int,
+    mode_type: str = "linear",
+    *,
+    min_ratio: float = 0.4,
+    rho: float = 0.5,
+):
+    """
+    Build sigma_list for GMM prior (L_inf setting).
+
+    Args:
+        epsilon: perturbation budget (L_inf radius)
+        K: number of mixture modes
+        mode_type:
+            - "linear"    : evenly spaced from min_ratio*ε to ε  (recommended)
+            - "geometric" : geometric progression ending at ε
+            - "full"      : evenly spaced from ε/K to ε
+        min_ratio: smallest sigma as fraction of epsilon (for linear)
+        rho: geometric ratio (for geometric)
+
+    Returns:
+        sigma_list: list of length K
+    """
+    if K <= 0:
+        raise ValueError("K must be positive.")
+
+    mode_type = mode_type.lower()
+
+    if mode_type == "linear":
+        sigma_list = torch.linspace(
+            min_ratio * epsilon,
+            epsilon,
+            steps=K
+        ).tolist()
+
+    elif mode_type == "geometric":
+        sigma_list = [
+            epsilon * (rho ** (K - 1 - k))
+            for k in range(K)
+        ]
+
+    elif mode_type == "full":
+        sigma_list = [
+            epsilon * (k + 1) / K
+            for k in range(K)
+        ]
+
+    else:
+        raise ValueError(f"Unknown mode_type: {mode_type}")
+
+    return sigma_list

@@ -1,18 +1,18 @@
-# scripts/eval_prob_perturbation.py — Evaluate trained classifier: probabilistic robustness
+# scripts/eval_prob_pert.py — Evaluate trained classifier: probabilistic robustness
 #
 # Reports:
 #   PR      — Langevin-sampled probabilistic robustness
 #   PR-G    — Gaussian random baseline
 #   PR-U    — Uniform random baseline
 #   PR-L    — Laplace random baseline
-#   PR-GMM  — Trained GMM-based probabilistic robustness (optional)
+#   PR-Mix  — Trained Mixture (MixedNoise4PR) probabilistic robustness (optional)
 #
 # Usage example:
-#   python scripts/eval_prob_perturbation.py \
+#   python scripts/eval_prob_pert.py \
 #       --dataset cifar10 --arch resnet18 \
 #       --ckp_path ./ckp/pr_training/resnet18_cifar10.pth \
-#       --norm linf --epsilon 0.03137 --num_samples 32 \
-#       --gmm_path ./ckp/gmm/gmm_resnet50_cifar10.pt
+#       --norm linf --epsilon 0.06274 --num_samples 32 \
+#       --mixture_path ./results/gmm_expressivity/resnet18_on_cifar10/mixture_K3_*.pt
 
 import os
 import time
@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import pandas as pd
 
-from arch import build_model
+from arch import build_model, build_feat_extractor
 from utils.preprocess_data import get_dataset, get_img_size
 from src.langevin4pr import pr_generator
 from utils.evaluator import Evaluator
@@ -42,6 +42,61 @@ def set_seed(seed: int = 42):
     cudnn.benchmark = False
 
 
+def load_mixture_model(mixture_path, dataset, device="cuda"):
+    """
+    Load a trained MixedNoise4PR checkpoint produced by train_mixture.py.
+
+    The checkpoint stores training args under cfg["config"] (= vars(args)).
+    feat_extractor and up_sampler module structures are rebuilt from those
+    args so that load_state_dict can fill in the saved weights.
+    """
+    from src.mixture4pr import MixedNoise4PR, build_decoder_from_flag
+
+    if not os.path.isfile(mixture_path):
+        raise FileNotFoundError(f"Mixture checkpoint not found: {mixture_path}")
+
+    ckpt = torch.load(mixture_path, map_location="cpu", weights_only=False)
+    cfg  = ckpt["config"]
+
+    # Training args are stored nested under cfg["config"] (from vars(args))
+    train_args = cfg.get("config", {})
+
+    num_cls   = cfg["num_cls"]
+    cond_mode = cfg["cond_mode"]   # None / "x" / "y" / "xy"
+
+    # Build feat_extractor module structure when conditioning on x or xy.
+    # Weights will be overwritten by load_state_dict — we only need the structure.
+    feat_extractor = None
+    if cond_mode in ("x", "xy"):
+        feat_arch = train_args.get("feat_arch") or train_args.get("arch", "resnet18")
+        feat_extractor = build_feat_extractor(feat_arch, num_cls, dataset)
+
+    # Build up_sampler module structure for trainable decoders.
+    up_sampler = None
+    if train_args.get("use_decoder", False):
+        decoder_backend = train_args.get("decoder_backend", "bicubic_trainable")
+        latent_dim      = cfg["latent_dim"]
+        img_size        = get_img_size(dataset)
+        channels        = 1 if dataset.lower() == "mnist" else 3
+        out_shape       = (channels, img_size, img_size)
+        up_sampler = build_decoder_from_flag(decoder_backend, latent_dim, out_shape, "cpu")
+
+    mixture = MixedNoise4PR.load_from_checkpoint(
+        mixture_path,
+        feat_extractor=feat_extractor,
+        up_sampler=up_sampler,
+        map_location=device,
+        strict=True,
+    )
+    mixture = mixture.to(device).eval()
+    for p in mixture.parameters():
+        p.requires_grad_(False)
+
+    # Stash resolved feat_arch for display
+    mixture._feat_arch = train_args.get("feat_arch") or train_args.get("arch", "resnet18")
+    return mixture
+
+
 # ------------------------------------------------------------------
 #                           Main Function
 # ------------------------------------------------------------------
@@ -49,7 +104,7 @@ def set_seed(seed: int = 42):
 def main():
     ap = argparse.ArgumentParser(
         description="Evaluate a trained image classifier — probabilistic robustness "
-                    "(PR, PR-G, PR-U, PR-L, PR-GMM)"
+                    "(PR, PR-G, PR-U, PR-L, PR-Mix)"
     )
 
     # ---- Model / checkpoint ----
@@ -88,16 +143,18 @@ def main():
                     help="Skip all random-noise PR baseline evaluations "
                          "(Gaussian, Uniform, Laplace)")
 
-    # ---- GMM PR evaluation ----
-    ap.add_argument("--gmm_path", type=str, 
-                    default='./ckp/gmm_fitting/resnet/resnet18_on_cifar10/gmm_K3_cond(x)_decoder(nontrainable)_linf(16)_reg(none).pt',
-                    help="Path to a trained GMM4PR checkpoint (.pt). "
-                         "When provided, a GMM-based PR evaluation is added.")
-    ap.add_argument("--gmm_epsilon", type=float, default=None,
-                    help="Override the perturbation radius for GMM evaluation.")
-    ap.add_argument("--gmm_norm", type=str, default=None,
+    # ---- Mixture PR evaluation ----
+    ap.add_argument("--mixture_path", type=str, default=None,
+                    help="Path to a trained MixedNoise4PR checkpoint (.pt) produced "
+                         "by train_mixture.py. When provided, a mixture-based PR "
+                         "evaluation is added.")
+    ap.add_argument("--mixture_epsilon", type=float, default=None,
+                    help="Override the perturbation radius for mixture evaluation. "
+                         "Defaults to the budget stored in the checkpoint.")
+    ap.add_argument("--mixture_norm", type=str, default=None,
                     choices=["linf", "l2"],
-                    help="Override the perturbation norm for GMM evaluation.")
+                    help="Override the perturbation norm for mixture evaluation. "
+                         "Defaults to the budget stored in the checkpoint.")
 
     # ---- Misc ----
     ap.add_argument("--seed", type=int, default=42)
@@ -110,7 +167,7 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     # ------------------------------------------------------------------
-    # Load checkpoint
+    # Load classifier checkpoint
     # ------------------------------------------------------------------
     if not os.path.isfile(args.ckp_path):
         raise FileNotFoundError(f"Checkpoint not found: {args.ckp_path}")
@@ -153,7 +210,7 @@ def main():
         )
 
     # ------------------------------------------------------------------
-    # Build and load model
+    # Build and load classifier
     # ------------------------------------------------------------------
     model = build_model(arch, num_classes, dataset)
     model.load_state_dict(ckpt["model_state"])
@@ -166,27 +223,30 @@ def main():
     print(f"[model] {arch} loaded — {num_classes} classes on {device}")
 
     # ------------------------------------------------------------------
-    # Optionally load trained GMM
+    # Optionally load trained Mixture model
     # ------------------------------------------------------------------
-    gmm = None
-    _gmm_eval_eps  = None
-    _gmm_eval_norm = None
-    if args.gmm_path is not None:
-        from utils.utils import load_gmm_model
-        print(f"[gmm] loading from: {args.gmm_path}")
-        gmm = load_gmm_model(
-            args.gmm_path,
+    mixture = None
+    _mix_eval_eps  = None
+    _mix_eval_norm = None
+    if args.mixture_path is not None:
+        print(f"[mixture] loading from: {args.mixture_path}")
+        mixture = load_mixture_model(
+            args.mixture_path,
             dataset=dataset,
             device=str(device),
         )
-        _gmm_feat_arch = gmm._feat_arch
-        _gmm_eval_eps  = args.gmm_epsilon if args.gmm_epsilon is not None else gmm.budget["eps"]
-        _gmm_eval_norm = args.gmm_norm    if args.gmm_norm    is not None else gmm.budget["norm"]
-        print(f"[gmm] loaded — K={gmm.K}, latent_dim={gmm.latent_dim}, "
-              f"cond_mode={gmm.cond_mode}")
-        print(f"[gmm] feat_arch={_gmm_feat_arch}  (classifier arch={arch})")
-        print(f"[gmm] training budget: eps={gmm.budget['eps']:.4f}, norm={gmm.budget['norm']}")
-        print(f"[gmm] eval budget:     eps={_gmm_eval_eps:.4f}, norm={_gmm_eval_norm}")
+        _mix_feat_arch = mixture._feat_arch
+        _mix_eval_eps  = args.mixture_epsilon if args.mixture_epsilon is not None \
+                         else mixture.budget["eps"]
+        _mix_eval_norm = args.mixture_norm    if args.mixture_norm    is not None \
+                         else mixture.budget["norm"]
+        print(f"[mixture] loaded — K={mixture.K}, latent_dim={mixture.latent_dim}, "
+              f"cond_mode={mixture._strategy.mode_name}")
+        print(f"[mixture] feat_arch={_mix_feat_arch}  (classifier arch={arch})")
+        print(f"[mixture] training budget: eps={mixture.budget['eps']:.4f}, "
+              f"norm={mixture.budget['norm']}")
+        print(f"[mixture] eval budget:     eps={_mix_eval_eps:.4f}, "
+              f"norm={_mix_eval_norm}")
 
     criterion = nn.CrossEntropyLoss()
 
@@ -266,28 +326,28 @@ def main():
                     if isinstance(v, (int, float)):
                         results[f"{split}_pr_rand_{_dist}_{k}"] = v
 
-        # 3. GMM-based PR
-        if gmm is not None:
-            print(f"[3] PR GMM evaluation  "
-                  f"(N={args.num_samples}, feat={_gmm_feat_arch}, "
-                  f"ε={_gmm_eval_eps:.4f}, norm={_gmm_eval_norm}) ...")
+        # 3. Mixture-based PR
+        if mixture is not None:
+            print(f"[3] PR Mixture evaluation  "
+                  f"(N={args.num_samples}, feat={_mix_feat_arch}, "
+                  f"ε={_mix_eval_eps:.4f}, norm={_mix_eval_norm}) ...")
             _t0 = time.perf_counter()
-            pr_gmm_res = evaluator.evaluate_pr_gmm(
-                gmm=gmm,
-                eval_name="PR-GMM",
+            pr_mix_res = evaluator.evaluate_pr_gmm(
+                gmm=mixture,
+                eval_name="PR-Mix",
                 num_samples=args.num_samples,
-                epsilon=args.gmm_epsilon,
-                norm=args.gmm_norm,
+                epsilon=args.mixture_epsilon,
+                norm=args.mixture_norm,
             )
-            _t_pr_gmm = time.perf_counter() - _t0
-            print(f"    pr_gmm={pr_gmm_res['pr']*100:.2f}%  "
-                  f"D={pr_gmm_res['stats']['D_proxy']:.3e}"
-                  f"  [{_t_pr_gmm:.1f}s]")
-            results[f"{split}_pr_gmm"] = pr_gmm_res["pr"]
-            results[f"{split}_pr_gmm_time"] = _t_pr_gmm
-            for k, v in pr_gmm_res.get("stats", {}).items():
+            _t_pr_mix = time.perf_counter() - _t0
+            print(f"    pr_mix={pr_mix_res['pr']*100:.2f}%  "
+                  f"D={pr_mix_res['stats']['D_proxy']:.3e}"
+                  f"  [{_t_pr_mix:.1f}s]")
+            results[f"{split}_pr_mix"] = pr_mix_res["pr"]
+            results[f"{split}_pr_mix_time"] = _t_pr_mix
+            for k, v in pr_mix_res.get("stats", {}).items():
                 if isinstance(v, (int, float)):
-                    results[f"{split}_pr_gmm_{k}"] = v
+                    results[f"{split}_pr_mix_{k}"] = v
 
     # ------------------------------------------------------------------
     # Print summary table
@@ -300,13 +360,13 @@ def main():
     print(f"  PR            : N={args.num_samples}, K={args.K}")
     if not args.no_pr_random:
         print(f"  PR random     : N={args.num_samples}, dists=gaussian,uniform,laplace")
-    if gmm is not None:
-        print(f"  PR GMM        : N={args.num_samples}, K={gmm.K}, "
-              f"cond={gmm.cond_mode}, feat={_gmm_feat_arch}")
-        print(f"                  train budget: eps={gmm.budget['eps']:.4f}, "
-              f"norm={gmm.budget['norm']}")
-        print(f"                  eval  budget: eps={_gmm_eval_eps:.4f}, "
-              f"norm={_gmm_eval_norm}")
+    if mixture is not None:
+        print(f"  PR Mixture    : N={args.num_samples}, K={mixture.K}, "
+              f"cond={mixture._strategy.mode_name}, feat={_mix_feat_arch}")
+        print(f"                  train budget: eps={mixture.budget['eps']:.4f}, "
+              f"norm={mixture.budget['norm']}")
+        print(f"                  eval  budget: eps={_mix_eval_eps:.4f}, "
+              f"norm={_mix_eval_norm}")
     print()
 
     # Timing
@@ -315,7 +375,7 @@ def main():
         ("pr-rand-gaussian",    "pr_rand_gaussian_time",   not args.no_pr_random),
         ("pr-rand-uniform",     "pr_rand_uniform_time",    not args.no_pr_random),
         ("pr-rand-laplace",     "pr_rand_laplace_time",    not args.no_pr_random),
-        ("pr-gmm",              "pr_gmm_time",             gmm is not None),
+        ("pr-mix",              "pr_mix_time",             mixture is not None),
     ]
     print(f"  {'Eval':<18}  " + "  ".join(f"{s:>8}" for s, _ in splits))
     print("  " + "-" * (18 + 2 + 10 * len(splits)))
@@ -336,8 +396,8 @@ def main():
     if not args.no_pr_random:
         header  += f"  {'PR-G':>7}  {'PR-U':>7}  {'PR-L':>7}"
         divider += 27
-    if gmm is not None:
-        header  += f"  {'PR-GMM':>8}"
+    if mixture is not None:
+        header  += f"  {'PR-Mix':>8}"
         divider += 10
     print(header)
     print("  " + "-" * divider)
@@ -347,8 +407,8 @@ def main():
         if not args.no_pr_random:
             for _dist in ("gaussian", "uniform", "laplace"):
                 row += f"  {results[f'{split}_pr_rand_{_dist}']*100:>6.2f}%"
-        if gmm is not None:
-            row += f"  {results[f'{split}_pr_gmm']*100:>7.2f}%"
+        if mixture is not None:
+            row += f"  {results[f'{split}_pr_mix']*100:>7.2f}%"
         print(row)
 
     # ------------------------------------------------------------------

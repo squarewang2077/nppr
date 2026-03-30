@@ -110,7 +110,7 @@ from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
 from src.adv_attacker import pgd_at_loss, trades_loss
 from src.langevin4pr import pr_generator
-from configs.train_clf_cfg import build_sigma_list
+from utils import build_sigma_list
 
 def setup_logger(log_path: str) -> logging.Logger:
     """Return a logger that writes to both stdout and *log_path*."""
@@ -329,9 +329,9 @@ def main():
                     help="Load ImageNet pretrained weights (recommended: use --lr 0.01)")
 
     # General Training Settings
-    ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch_size", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=0.1)
+    ap.add_argument("--epochs", type=int, default=100)
+    ap.add_argument("--batch_size", type=int, default=1024)
+    ap.add_argument("--lr", type=float, default=0.01)
     ap.add_argument("--weight_decay", type=float, default=5e-4)
     ap.add_argument("--img_size", type=int, default=None,
                     help="Input image size (will be resized if dataset images are different)")
