@@ -9,3 +9,28 @@ tmp/*
 tests/standard_training/*
 tests/adv_training/*
 tests/pr_training/*
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# IDE settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
