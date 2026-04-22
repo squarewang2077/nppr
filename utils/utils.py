@@ -282,8 +282,10 @@ def pr_gmm_generator(model, x, y, gmm,
     # Resolve effective budget
     train_eps  = float(gmm.budget["eps"])
     train_norm = gmm.budget["norm"].lower()
-    eval_eps   = epsilon if epsilon is not None else train_eps
-    eval_norm  = norm.lower() if norm is not None else train_norm
+
+    # Override with evaluation budget if provided; otherwise use training budget.
+    gmm.budget["eps"]   = epsilon if epsilon is not None else train_eps
+    gmm.budget["norm"]  = norm.lower() if norm is not None else train_norm
 
     gmm.eval()
     with torch.no_grad():
@@ -292,23 +294,6 @@ def pr_gmm_generator(model, x, y, gmm,
     # GMM4PR.sample() returns delta shaped (N, B, C, H, W) — transpose to
     # (B, N, C, H, W) to match the expected distributional batch format.
     delta = out["delta"].permute(1, 0, 2, 3, 4).contiguous()   # (B, N, C, H, W)
-
-    # Re-project onto the evaluation budget if it differs from training budget.
-    # This does not mutate the GMM — the delta tensor is simply re-clamped /
-    # rescaled.  For L-inf the GMM produces eps*tanh(u) ∈ (-train_eps, train_eps),
-    # so a clamp to [-eval_eps, eval_eps] is exact.  For L2 the GMM produces
-    # L2-normalised deltas scaled to train_eps, so we rescale accordingly.
-    if eval_eps != train_eps or eval_norm != train_norm:
-        if eval_norm in ("linf", "l_inf"):
-            delta = delta.clamp(-eval_eps, eval_eps)
-        elif eval_norm in ("l2", "l_2"):
-            BN = B * N
-            d2 = delta.reshape(BN, -1)
-            norms = d2.norm(p=2, dim=1, keepdim=True).clamp_min(1e-12)
-            factors = torch.minimum(torch.ones_like(norms), eval_eps / norms)
-            delta = (d2 * factors).view(B, N, *x0.shape[1:])
-        else:
-            raise ValueError(f"Unsupported eval norm: {eval_norm}")
 
     x_adv = torch.clamp(x0.unsqueeze(1) + delta, 0.0, 1.0).detach()
 

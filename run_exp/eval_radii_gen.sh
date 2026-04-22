@@ -10,32 +10,33 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
 # ------------------------------------------------------------------
-# Radii generalisation evaluation for resnet18 on cifar10.
+# Radii generalisation evaluation for resnet18 on cifar100.
 #
 # GMM : K=7, cond=xy, trainable_128 decoder, trained at linf radii
-#        4, 8, 16  (ckp/gmm_fitting/resnet/resnet18_on_cifar10/)
+#        4, 8, 16  (ckp/gmm_fitting/resnet/resnet18_on_cifar100/)
 #
-# For each loaded GMM radius, evaluate PR at all three eval radii
-# (4, 8, 16) → 9 combinations total.
+# For each loaded GMM radius, evaluate PR at all four eval radii
+# (4, 8, 16, 32) → 12 combinations total.
 #
 # Epsilon mapping (integer label → float):
 #   4  → 4/255  ≈ 0.01569
 #   8  → 8/255  ≈ 0.03137
 #  16  → 16/255 ≈ 0.06275
+#  32  → 32/255 ≈ 0.12549
 #
 # Results: ./results/gmm_radii_gen/
-#   eval_prob_pert_resnet18_cifar10_gmmR{gmm_r}_evalR{eval_r}.csv
+#   eval_prob_pert_vgg16_cifar10_gmmR{gmm_r}_evalR{eval_r}.csv
 # ------------------------------------------------------------------
 
-ARCH="resnet18"
-DATASET="cifar10"
-CLF_CKPT="${PROJECT_ROOT}/ckp/standard/resnet/${ARCH}_${DATASET}.pth"
-GMM_BASE="${PROJECT_ROOT}/ckp/gmm_fitting/resnet/${ARCH}_on_${DATASET}"
+ARCH="vgg16"
+DATASET="tinyimagenet"
+CLF_CKPT="${PROJECT_ROOT}/ckp/standard/vgg/${ARCH}_${DATASET}.pth"
+GMM_BASE="${PROJECT_ROOT}/ckp/gmm_fitting/vgg/${ARCH}_on_${DATASET}"
 RESULTS_DIR="${PROJECT_ROOT}/results/gmm_radii_gen"
 
 # Integer radius labels and their float equivalents (paired by index)
-RADII_INT=(4       8       16     )
-RADII_FLT=(0.01569 0.03137 0.06275)
+RADII_INT=(4       8       16      32     )
+RADII_FLT=(0.01569 0.03137 0.06275 0.12549)
 
 mkdir -p "${RESULTS_DIR}"
 
@@ -75,10 +76,10 @@ for i in "${!RADII_INT[@]}"; do
             --arch "${ARCH}" \
             --dataset "${DATASET}" \
             --ckp_path "${CLF_CKPT}" \
-            --norm linf \
-            --epsilon "${EVAL_EPS}" \
-            --num_samples 32 --K 7 \
             --gmm_path "${GMM_CKPT}" \
+            --gmm_epsilon "${EVAL_EPS}" \
+            --gmm_norm linf \
+            --num_samples 32 \
             --save_csv "${OUT_CSV}"
 
         echo "  -> saved: ${OUT_CSV}"

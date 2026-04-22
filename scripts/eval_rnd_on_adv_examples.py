@@ -1,19 +1,15 @@
-# scripts/eval_prob_perturbation.py — Evaluate GMM-based probabilistic robustness
-#
-# Purpose:
-#   Test how GMM PR performance changes when the evaluation radius (epsilon)
-#   differs from the radius used during GMM training.
+# scripts/eval_rnd_on_adv_examples.py — Evaluate 1-step PGD + Gaussian sampling
 #
 # Reports:
-#   PR-GMM  — Trained GMM-based probabilistic robustness
+#   PR Acc — Probabilistic Robustness accuracy: fraction of Gaussian samples
+#            around 1-step PGD adversarial examples that are correctly classified
 #
 # Usage example:
-#   python scripts/eval_prob_perturbation.py \
+#   python scripts/eval_rnd_on_adv_examples.py \
 #       --dataset cifar10 --arch resnet18 \
-#       --ckp_path ./ckp/pr_training/resnet18_cifar10.pth \
-#       --gmm_path ./ckp/gmm/gmm_resnet50_cifar10.pt \
-#       --gmm_epsilon 0.06274 \
-#       --num_samples 32
+#       --ckp_path ./ckp/adv_training/resnet18_cifar10.pth \
+#       --norm linf --epsilon 0.03137 --alpha 0.00784 \
+#       --num_samples 100 --variance 0.01
 
 import os
 import time
@@ -28,8 +24,75 @@ import pandas as pd
 
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
-from utils.evaluator import Evaluator
+from src.adv_attacker import pgd_attack
+from utils.evaluator import Evaluator, DistributionEvalBatch
 from pathlib import Path
+
+
+def pgd_gaussian_transform(model, x, y, epsilon, alpha, norm, num_samples, variance, **_):
+    """
+    1-step PGD attack followed by Gaussian sampling around the adversarial point.
+
+    Args:
+        model: Target model
+        x: Clean inputs (B, C, H, W)
+        y: True labels (B,)
+        epsilon: Maximum perturbation radius for PGD
+        alpha: Step size for 1-step PGD
+        norm: "linf" or "l2"
+        num_samples: Number of Gaussian samples to draw around each PGD point
+        variance: Variance of the Gaussian distribution
+
+    Returns:
+        DistributionEvalBatch with x of shape (B, num_samples, C, H, W)
+    """
+    # Step 1: Generate 1-step PGD adversarial examples
+    x_pgd = pgd_attack(
+        model, x, y,
+        epsilon=epsilon,
+        alpha=alpha,
+        num_steps=1,
+        norm=norm,
+        random_start=True
+    )
+
+    # Step 2: Sample around the PGD point using Gaussian distribution
+    B, C, H, W = x.shape
+    x_samples = torch.zeros(B, num_samples, C, H, W, device=x.device)
+
+    for i in range(num_samples):
+        # Generate Gaussian noise with specified variance
+        noise = torch.randn_like(x_pgd) * np.sqrt(variance)
+
+        # Add noise to PGD point
+        x_noisy = x_pgd + noise
+
+        # Project back onto the epsilon-ball (ensure perturbation budget is respected)
+        delta = x_noisy - x
+        if norm.lower() == "linf":
+            # L-inf projection
+            delta = torch.clamp(delta, -epsilon, epsilon)
+        else:  # l2
+            # L2 projection
+            delta_flat = delta.view(B, -1)
+            delta_norms = delta_flat.norm(p=2, dim=1, keepdim=True).clamp_min(1e-12)
+            factors = torch.minimum(torch.ones_like(delta_norms), epsilon / delta_norms)
+            delta = (delta_flat * factors).view_as(delta)
+
+        x_noisy = x + delta
+
+        # Clamp to valid image range [0, 1]
+        x_noisy = torch.clamp(x_noisy, 0.0, 1.0)
+
+        x_samples[:, i] = x_noisy
+
+    # Collect statistics
+    stats = {
+        "variance": variance,
+        "num_samples": num_samples,
+    }
+
+    return DistributionEvalBatch(x=x_samples, stats=stats)
 
 
 def set_seed(seed: int = 42):
@@ -47,8 +110,7 @@ def set_seed(seed: int = 42):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Evaluate GMM-based probabilistic robustness — "
-                    "supports testing at a different radius than training."
+        description="Evaluate 1-step PGD + Gaussian sampling around adversarial examples"
     )
 
     # ---- Model / checkpoint ----
@@ -56,31 +118,31 @@ def main():
         "resnet18", "resnet50", "wide_resnet50_2",
         "vgg16", "densenet121", "mobilenet_v3_large", "efficientnet_b0",
         "vit_b_16",
-        ], default="resnet50")
+        ], default="resnet18")
     ap.add_argument("--ckp_path", type=str,
-                    default="./ckp/standard/resnet/resnet50_cifar10.pth")
+                    default="ckp/tmp/cifar10/resnet18_cifar10.pth")
 
     # ---- Dataset ----
     ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet"],
                     default="cifar10")
     ap.add_argument("--data_root", type=str, default="./dataset")
     ap.add_argument("--img_size", type=int, default=None)
-    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--eval_train", action="store_true", default=False,
                     help="Also evaluate on the training split")
 
-    # ---- GMM PR evaluation ----
-    ap.add_argument("--gmm_path", type=str,
-                    default='./ckp/gmm_fitting/resnet/resnet18_on_cifar10/gmm_K3_cond(x)_decoder(nontrainable)_linf(16)_reg(none).pt',
-                    help="Path to a trained GMM4PR checkpoint (.pt).")
-    ap.add_argument("--gmm_epsilon", type=float, default=None,
-                    help="Override the perturbation radius for GMM evaluation "
-                         "(test at a different radius than training).")
-    ap.add_argument("--gmm_norm", type=str, default=None,
-                    choices=["linf", "l2"],
-                    help="Override the perturbation norm for GMM evaluation.")
-    ap.add_argument("--num_samples", type=int, default=32,
-                    help="Number of perturbation samples per input (N)")
+    # ---- 1-step PGD settings ----
+    ap.add_argument("--norm", choices=["linf", "l2"], default="linf")
+    ap.add_argument("--epsilon", type=float, default=16/255,
+                    help="Maximum perturbation radius for PGD")
+    ap.add_argument("--alpha", type=float, default=2/255,
+                    help="Step size for 1-step PGD")
+
+    # ---- Gaussian sampling settings ----
+    ap.add_argument("--num_samples", type=int, default=100,
+                    help="Number of Gaussian samples around each PGD point")
+    ap.add_argument("--variance", type=float, default=0.01,
+                    help="Variance of Gaussian distribution for sampling")
 
     # ---- Misc ----
     ap.add_argument("--seed", type=int, default=42)
@@ -148,36 +210,14 @@ def main():
 
     print(f"[model] {arch} loaded — {num_classes} classes on {device}")
 
-    # ------------------------------------------------------------------
-    # Load trained GMM (required)
-    # ------------------------------------------------------------------
-    if args.gmm_path is None:
-        raise ValueError("--gmm_path is required for GMM PR evaluation.")
-
-    from utils.utils import load_gmm_model
-    print(f"[gmm] loading from: {args.gmm_path}")
-    gmm = load_gmm_model(
-        args.gmm_path,
-        dataset=dataset,
-        device=str(device),
-    )
-    _gmm_feat_arch = gmm._feat_arch
-    _gmm_eval_eps  = args.gmm_epsilon if args.gmm_epsilon is not None else gmm.budget["eps"]
-    _gmm_eval_norm = args.gmm_norm    if args.gmm_norm    is not None else gmm.budget["norm"]
-    print(f"[gmm] loaded — K={gmm.K}, latent_dim={gmm.latent_dim}, "
-          f"cond_mode={gmm.cond_mode}")
-    print(f"[gmm] feat_arch={_gmm_feat_arch}  (classifier arch={arch})")
-    print(f"[gmm] training budget: eps={gmm.budget['eps']:.4f}, norm={gmm.budget['norm']}")
-    print(f"[gmm] eval budget:     eps={_gmm_eval_eps:.4f}, norm={_gmm_eval_norm}")
-
     criterion = nn.CrossEntropyLoss()
 
     results = {
         "arch": arch, "dataset": dataset,
         "training_type": training_type, "ckp_path": args.ckp_path,
-        "gmm_train_eps": gmm.budget["eps"], "gmm_train_norm": gmm.budget["norm"],
-        "gmm_eval_eps": _gmm_eval_eps, "gmm_eval_norm": _gmm_eval_norm,
-        "num_samples": args.num_samples,
+        "norm": args.norm, "epsilon": args.epsilon,
+        "alpha": args.alpha, "num_samples": args.num_samples,
+        "variance": args.variance,
     }
 
     splits = [("test", test_loader)]
@@ -185,7 +225,7 @@ def main():
         splits.append(("train", train_loader))
 
     # ------------------------------------------------------------------
-    # Run GMM PR evaluation
+    # Run PGD + Gaussian sampling evaluation
     # ------------------------------------------------------------------
     for split, loader in splits:
         print(f"\n{'='*60}")
@@ -194,25 +234,29 @@ def main():
 
         evaluator = Evaluator(model, loader, criterion, device)
 
-        print(f"[PR-GMM] N={args.num_samples}, feat={_gmm_feat_arch}, "
-              f"ε={_gmm_eval_eps:.4f}, norm={_gmm_eval_norm} ...")
+        print(f"[1-step PGD + Gaussian] evaluation  "
+              f"(norm={args.norm}, ε={args.epsilon:.4f}, α={args.alpha:.4f}, "
+              f"num_samples={args.num_samples}, variance={args.variance:.4f}) ...")
         _t0 = time.perf_counter()
-        pr_gmm_res = evaluator.evaluate_pr_gmm(
-            gmm=gmm,
-            eval_name="PR-GMM",
+
+        result = evaluator.evaluate(
+            transform=pgd_gaussian_transform,
+            eval_name=f"PGD1-Gaussian-{args.num_samples}",
+            epsilon=args.epsilon,
+            alpha=args.alpha,
+            norm=args.norm,
             num_samples=args.num_samples,
-            epsilon=args.gmm_epsilon,
-            norm=args.gmm_norm,
+            variance=args.variance,
         )
-        _t_pr_gmm = time.perf_counter() - _t0
-        print(f"    pr_gmm={pr_gmm_res['pr']*100:.2f}%  "
-              f"D={pr_gmm_res['stats']['D_proxy']:.3e}"
-              f"  [{_t_pr_gmm:.1f}s]")
-        results[f"{split}_pr_gmm"] = pr_gmm_res["pr"]
-        results[f"{split}_pr_gmm_time"] = _t_pr_gmm
-        for k, v in pr_gmm_res.get("stats", {}).items():
-            if isinstance(v, (int, float)):
-                results[f"{split}_pr_gmm_{k}"] = v
+
+        _t_eval = time.perf_counter() - _t0
+
+        print(f"    pr={result['pr']*100:.2f}%  num_draws={result['num_draws']}"
+              f"  [{_t_eval:.1f}s]")
+
+        results[f"{split}_pr"]        = result["pr"]
+        results[f"{split}_num_draws"] = result["num_draws"]
+        results[f"{split}_time"]      = _t_eval
 
     # ------------------------------------------------------------------
     # Print summary table
@@ -220,35 +264,27 @@ def main():
     print(f"\n{'='*60}")
     print("Summary")
     print(f"{'='*60}")
-    print(f"  Checkpoint    : {args.ckp_path}")
-    print(f"  Arch / Dataset: {arch} / {dataset}  [{training_type}]")
-    print(f"  PR GMM        : N={args.num_samples}, K={gmm.K}, "
-          f"cond={gmm.cond_mode}, feat={_gmm_feat_arch}")
-    print(f"                  train budget: eps={gmm.budget['eps']:.4f}, "
-          f"norm={gmm.budget['norm']}")
-    print(f"                  eval  budget: eps={_gmm_eval_eps:.4f}, "
-          f"norm={_gmm_eval_norm}")
+    print(f"  Checkpoint     : {args.ckp_path}")
+    print(f"  Arch / Dataset : {arch} / {dataset}  [{training_type}]")
+    print(f"  1-step PGD     : norm={args.norm}, ε={args.epsilon:.4f}, "
+          f"α={args.alpha:.4f}")
+    print(f"  Gaussian       : num_samples={args.num_samples}, "
+          f"variance={args.variance:.4f}")
     print()
 
     # Timing
-    print(f"  {'Eval':<18}  " + "  ".join(f"{s:>8}" for s, _ in splits))
-    print("  " + "-" * (18 + 2 + 10 * len(splits)))
-    vals = "  ".join(
-        f"{results[f'{s}_pr_gmm_time']:>7.1f}s"
-        if f"{s}_pr_gmm_time" in results else f"{'N/A':>8}"
-        for s, _ in splits
-    )
-    print(f"  {'pr-gmm':<18}  {vals}")
+    print(f"  {'Split':<14}  {'Time':>8}")
+    print("  " + "-" * (14 + 2 + 8))
+    for split, _ in splits:
+        print(f"  {split:<14}  {results[f'{split}_time']:>7.1f}s")
     print()
 
-    # Accuracy table
-    header  = f"  {'Split':<6}  {'PR-GMM':>8}"
-    divider = 6 + 2 + 8
-    print(header)
-    print("  " + "-" * divider)
+    # PR accuracy table
+    print(f"  {'Split':<6}  {'PR Acc':>9}  {'Num Draws':>10}")
+    print("  " + "-" * (6 + 2 + 9 + 2 + 10))
     for split, _ in splits:
-        row = f"  {split:<6}  {results[f'{split}_pr_gmm']*100:>7.2f}%"
-        print(row)
+        print(f"  {split:<6}  {results[f'{split}_pr']*100:>8.2f}%  "
+              f"{results[f'{split}_num_draws']:>10d}")
 
     # ------------------------------------------------------------------
     # Optional CSV save

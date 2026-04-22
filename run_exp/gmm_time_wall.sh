@@ -22,8 +22,8 @@ K=7
 STD_MODEL_DIR="${PROJECT_ROOT}/ckp/standard"
 CKPT_DIR="${PROJECT_ROOT}/ckp/mixture_fitting4std_models"
 
-DATASETS=("tinyimagenet")
-MODELS=("resnet50" "wide_resnet50_2" "vgg16")
+DATASETS=("cifar10" "cifar100" "tinyimagenet")
+MODELS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
 
 echo "=========================================="
 echo "  Mixture Model Wall-time Analysis"
