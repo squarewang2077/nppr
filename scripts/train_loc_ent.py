@@ -323,9 +323,9 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-4)
 
     # ---- LR scheduler ----
-    parser.add_argument("--use_lr_scheduler", action="store_true", default=True)
-    parser.add_argument("--no_lr_scheduler",  dest="use_lr_scheduler",
-                        action="store_false")
+    parser.add_argument("--use_lr_scheduler", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="Enable warmup+cosine LR schedule (use --no-use_lr_scheduler to disable)")
     parser.add_argument("--lr_warmup_epochs", type=int,   default=5,
                         help="Linear warmup length (epochs)")
     parser.add_argument("--lr_min",           type=float, default=1e-6,
