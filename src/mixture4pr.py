@@ -1342,6 +1342,7 @@ class MixedNoiseDistribution(nn.Module):
         3. Concatenate along K, then soft-weighted sum → [S, B, D].
         """
         self._require_initialized()
+        assert self._components is not None and self._component_slices is not None
         pi_logits = cache.pi_logits                            # [B, K]
         mu = cache.mu                                          # [B, K, D]
         B, K, D = mu.shape
@@ -1381,6 +1382,7 @@ class MixedNoiseDistribution(nn.Module):
         the selected component.  Returns ``[num_samples, B, latent_dim]``.
         """
         self._require_initialized()
+        assert self._components is not None and self._component_slices is not None
         pi_logits = cache.pi_logits                            # [B, K]
         mu = cache.mu                                          # [B, K, D]
         B, K, D = mu.shape
@@ -1648,6 +1650,7 @@ class PerturbationModel(MixedNoiseDistribution):
         loading.
         """
         self._require_initialized()
+        assert self._components is not None and self._strategy is not None
         for comp in self._components:
             if not comp.registry_name:
                 raise ValueError(
@@ -2034,7 +2037,7 @@ def build_decoder_from_flag(backend: str, latent_dim: int,
               f"{sum(p.numel() for p in decoder.parameters()):,} params")
 
     elif backend == "bicubic_trainable":
-        class BicubicDecoder(nn.Module):
+        class BicubicTrainableDecoder(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.init_size = calc_init_size(min(H, W))
@@ -2048,7 +2051,7 @@ def build_decoder_from_flag(backend: str, latent_dim: int,
                 return F.interpolate(h, size=(H, W), mode='bicubic',
                                      align_corners=False)
 
-        decoder = BicubicDecoder().to(device)
+        decoder = BicubicTrainableDecoder().to(device)
         print(f"[Decoder 'bicubic_trainable'] "
               f"{sum(p.numel() for p in decoder.parameters()):,} params")
 

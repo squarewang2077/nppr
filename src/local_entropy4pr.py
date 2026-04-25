@@ -1,532 +1,492 @@
-# region_generator.py - Region-aware / local-Gibbs perturbation generator
-#
-# Requirements:
-#   torch >= 2.0
-#
-# Supports:
-#   - single particle population (empirical perturbation distribution)
-#   - adaptive threshold t_k
-#   - dynamic scope gamma_k linked to t_k
-#   - local-Gibbs-guided projected Langevin dynamics
-#
-# Notes:
-#   1) This file implements only the INNER perturbation generator.
-#   2) The OUTER objective (e.g. KL regularization / TRADES-like training)
-#      should be handled in the training loop.
-#   3) State dict can be used for warm-start across iterations.
-
 import torch
 import torch.nn.functional as F
 
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
-# --------------------------------------------------
-# Margin
-# --------------------------------------------------
 
-def _margin(logits, y):
+# ============================================================
+# Configs
+# ============================================================
+
+@dataclass
+class EnergyConfig:
+    psi_type: str = "softplus"
+    psi_alpha: float = 10.0
+
+
+@dataclass
+class LangevinConfig:
+    steps: int = 5
+    step_size: float = 1e-2
+    beta: float = 1.0
+    noise_scale: float = 1.0
+
+
+# ============================================================
+# Particle State
+# ============================================================
+
+class ParticleState:
+    """
+    Minimal particle state.
+
+    Maintains:
+        particles: perturbation particles, shape (B, N, C, H, W)
+        x_adv:     adversarial particles, shape (B, N, C, H, W)
+        t:         current threshold
+        step_idx:  update counter
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        norm: str = "linf",
+        num_particles: int = 8,
+    ):
+        self.epsilon = float(epsilon)
+        self.norm = norm.lower()
+        self.num_particles = int(num_particles)
+
+        if self.norm not in ["linf", "l2"]:
+            raise ValueError("norm must be 'linf' or 'l2'.")
+
+        self.particles: Optional[torch.Tensor] = None
+        self.x_adv: Optional[torch.Tensor] = None
+
+        self.t: Optional[torch.Tensor] = None
+        self.step_idx: int = 0
+
+    def init_particles(
+        self,
+        x: torch.Tensor,
+        method: str = "uniform",
+        scale: Optional[float] = None,
+        warm_start: bool = False,
+    ) -> torch.Tensor:
+        """
+        Initialize or reuse perturbation particles.
+        """
+        B, C, H, W = x.shape
+        shape = (B, self.num_particles, C, H, W)
+
+        if warm_start and self.particles is not None:
+            if tuple(self.particles.shape) == shape:
+                self.particles = self.particles.detach().clone().to(
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                self.update_x_adv(x)
+                return self.particles
+
+        if scale is None:
+            scale = self.epsilon
+
+        if method == "zero":
+            particles = torch.zeros(shape, device=x.device, dtype=x.dtype)
+
+        elif method == "uniform":
+            if self.norm == "linf":
+                particles = torch.empty(shape, device=x.device, dtype=x.dtype)
+                particles.uniform_(-self.epsilon, self.epsilon)
+            else:
+                particles = torch.randn(shape, device=x.device, dtype=x.dtype) * scale
+
+        elif method == "gaussian":
+            particles = torch.randn(shape, device=x.device, dtype=x.dtype) * scale
+
+        else:
+            raise ValueError("method must be 'zero', 'uniform', or 'gaussian'.")
+
+        self.particles = self.project(particles, x)
+        self.update_x_adv(x)
+
+        return self.particles
+
+    def project(
+        self,
+        particles: torch.Tensor,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Project particles into:
+            ||delta|| <= epsilon
+            0 <= x + delta <= 1
+        """
+        if self.norm == "linf":
+            lower = torch.maximum(
+                torch.full_like(x, -self.epsilon),
+                -x,
+            ).unsqueeze(1)
+
+            upper = torch.minimum(
+                torch.full_like(x, self.epsilon),
+                1.0 - x,
+            ).unsqueeze(1)
+
+            particles = torch.max(torch.min(particles, upper), lower)
+
+        elif self.norm == "l2":
+            B, N = particles.shape[:2]
+            flat = particles.reshape(B, N, -1)
+
+            norms = flat.norm(dim=2, keepdim=True).clamp_min(1e-12)
+            scale = (self.epsilon / norms).clamp_max(1.0)
+
+            particles = (flat * scale).reshape_as(particles)
+            particles = (x.unsqueeze(1) + particles).clamp(0.0, 1.0) - x.unsqueeze(1)
+
+        return particles
+
+    @torch.no_grad()
+    def update_x_adv(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Update adversarial particles:
+            x_adv = x + particles
+        """
+        if self.particles is None:
+            raise RuntimeError("Particles are not initialized.")
+
+        B, N, C, H, W = self.particles.shape
+        x_rep = x.unsqueeze(1).expand(B, N, C, H, W)
+
+        self.x_adv = (x_rep + self.particles).clamp(0.0, 1.0)
+        return self.x_adv
+
+    def reset(self) -> None:
+        self.particles = None
+        self.x_adv = None
+        self.t = None
+        self.step_idx = 0
+
+
+# ============================================================
+# Basic functions
+# ============================================================
+
+def margin(logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     Multiclass margin:
-        m(x, y) = h_y(x) - max_{j!=y} h_j(x)
-
-    Args:
-        logits: (N, C)
-        y:      (N,)
-
-    Returns:
-        margin: (N,)
+        m(x, y) = h_y(x) - max_{j != y} h_j(x)
     """
     f_y = logits.gather(1, y.view(-1, 1)).squeeze(1)
 
-    tmp = logits.clone()
-    tmp[torch.arange(logits.size(0), device=logits.device), y] = -1e9
-    f_other = tmp.max(dim=1).values
+    wrong_logits = logits.clone()
+    wrong_logits.scatter_(1, y.view(-1, 1), float("-inf"))
+    f_other = wrong_logits.max(dim=1).values
 
-    margin = f_y - f_other
-    return margin
+    return f_y - f_other
 
 
-# --------------------------------------------------
-# Thresholded energy E_t(u; x, y) = psi(m(x+u,y)-t)
-# --------------------------------------------------
-
-def _threshold_energy(margin, t, psi_type="softplus", psi_alpha=10.0):
+def threshold_energy(
+    margins: torch.Tensor,
+    t: torch.Tensor,
+    cfg: EnergyConfig,
+) -> torch.Tensor:
     """
-    Thresholded energy:
-        E_t = psi(margin - t)
-
-    Low energy corresponds to margin < t.
-
-    Args:
-        margin:    (...,)
-        t:         broadcastable to margin
-        psi_type:  "softplus" or "hinge"
-        psi_alpha: softness parameter for softplus
-
-    Returns:
-        energy: (...,)
+    Thresholded margin energy:
+        E_t(m) = psi(m - t)
     """
-    z = margin - t
+    z = margins - t
 
-    if psi_type == "softplus":
-        # smooth version, preferred for Langevin
-        energy = F.softplus(psi_alpha * z) / psi_alpha
-    elif psi_type == "hinge":
-        energy = torch.relu(z)
-    else:
-        raise ValueError(f"Unsupported psi_type: {psi_type}")
+    if cfg.psi_type == "softplus":
+        return F.softplus(cfg.psi_alpha * z) / cfg.psi_alpha
 
-    return energy
+    if cfg.psi_type == "hinge":
+        return torch.relu(z)
+
+    raise ValueError(f"Unknown psi_type: {cfg.psi_type}")
 
 
-# --------------------------------------------------
-# Projection onto perturbation set
-# --------------------------------------------------
-
-def _project_delta(delta, epsilon, norm="linf"):
+@torch.no_grad()
+def compute_margins(
+    *,
+    model,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    state: ParticleState,
+) -> torch.Tensor:
     """
-    Project perturbations onto L_inf or L2 ball.
-
-    Args:
-        delta:   (..., C, H, W)
-        epsilon: radius
-        norm:    "linf" or "l2"
-
-    Returns:
-        projected delta
+    Compute margins for current particles.
     """
-    if norm.lower() in ["linf", "l_inf", "l-infty", "l∞"]:
-        return delta.clamp(-epsilon, epsilon)
+    if state.particles is None:
+        raise RuntimeError("Particles are not initialized.")
 
-    elif norm.lower() in ["l2", "l_2"]:
-        orig_shape = delta.shape
-        flat = delta.reshape(delta.size(0), -1)
-        norms = torch.norm(flat, p=2, dim=1, keepdim=True).clamp_min(1e-12)
-        factors = torch.minimum(torch.ones_like(norms), epsilon / norms)
-        flat = flat * factors
-        return flat.view(orig_shape)
+    state.update_x_adv(x)
 
-    else:
-        raise ValueError(f"Unsupported norm: {norm}")
+    B, N, C, H, W = state.x_adv.shape
+    y_rep = y.unsqueeze(1).expand(B, N).reshape(-1)
+
+    logits = model(state.x_adv.reshape(B * N, C, H, W))
+    margins = margin(logits, y_rep).view(B, N)
+
+    return margins
 
 
-def _clamp_x_adv(x, delta):
+# ============================================================
+# Threshold strategies
+# ============================================================
+
+def fixed_threshold_update(
+    *,
+    margins: torch.Tensor,
+    state: ParticleState,
+    t: float = 0.0,
+) -> torch.Tensor:
     """
-    Build adversarial input and clamp to [0,1].
-    x:     (B, C, H, W)
-    delta: (B, M, C, H, W)
-
-    Returns:
-        x_adv: (B, M, C, H, W)
+    Fixed threshold:
+        t_curr = t
     """
-    return torch.clamp(x.unsqueeze(1) + delta, 0.0, 1.0)
+    B = margins.shape[0]
+
+    t_curr = torch.full(
+        (B,),
+        float(t),
+        device=margins.device,
+        dtype=margins.dtype,
+    )
+
+    state.t = t_curr.detach()
+    return t_curr
 
 
-# --------------------------------------------------
-# Threshold update: minimum-of-three
-# --------------------------------------------------
-
-def _update_threshold(
-    margins,              # (B, M)
-    t_prev,               # (B,)
-    t0,                   # scalar or (B,)
-    step_idx,
-    q=0.4,
-    delta_min=0.01,
-    t_floor=0.0,
-    tau_decay=0.995,
-):
+def adaptive_threshold_update(
+    *,
+    margins: torch.Tensor,
+    state: ParticleState,
+    t0: float,
+    t_floor: float = 0.0,
+    q: float = 0.4,
+    delta_min: float = 0.01,
+    decay: float = 0.995,
+) -> torch.Tensor:
     """
-    Adaptive threshold update:
-        t_candidate = q-quantile of current particle margins
-        t_progress  = t_prev - delta_min
-        t_schedule  = max(t_floor, t0 * tau_decay^(step_idx+1))
-        t_next      = min(t_progress, t_candidate, t_schedule)
-        t_next      = max(t_floor, t_next)
-
-    Returns:
-        t_next:      (B,)
-        t_candidate: (B,)
-        t_schedule:  (B,)
+    Adaptive threshold:
+        t_next = min(
+            t_prev - delta_min,
+            quantile_q(margins),
+            t0 * decay^(step_idx + 1)
+        )
+        t_next = max(t_floor, t_next)
     """
+    B = margins.shape[0]
     device = margins.device
-    B = margins.size(0)
+    dtype = margins.dtype
 
-    # PyTorch quantile works on float tensors
-    t_candidate = torch.quantile(margins, q=q, dim=1)  # (B,)
+    if state.t is not None and state.t.shape == (B,):
+        t_prev = state.t.to(device=device, dtype=dtype)
+    else:
+        t_prev = torch.full((B,), float(t0), device=device, dtype=dtype)
 
-    # progress term
+    t_candidate = torch.quantile(margins.detach(), q=q, dim=1)
     t_progress = t_prev - delta_min
 
-    # schedule term
-    if not torch.is_tensor(t0):
-        t0_tensor = torch.full((B,), float(t0), device=device, dtype=margins.dtype)
-    else:
-        t0_tensor = t0.to(device=device, dtype=margins.dtype).view(B)
-
-    t_schedule = torch.maximum(
-        torch.full((B,), float(t_floor), device=device, dtype=margins.dtype),
-        t0_tensor * (tau_decay ** (step_idx + 1))
+    t_schedule_value = max(
+        float(t_floor),
+        float(t0) * (decay ** (state.step_idx + 1)),
+    )
+    t_schedule = torch.full(
+        (B,),
+        t_schedule_value,
+        device=device,
+        dtype=dtype,
     )
 
-    t_next = torch.minimum(torch.minimum(t_progress, t_candidate), t_schedule)
-    t_next = torch.maximum(
-        torch.full((B,), float(t_floor), device=device, dtype=margins.dtype),
-        t_next
+    t_next = torch.minimum(t_progress, t_candidate)
+    t_next = torch.minimum(t_next, t_schedule)
+
+    t_floor_tensor = torch.full(
+        (B,),
+        float(t_floor),
+        device=device,
+        dtype=dtype,
     )
+    t_next = torch.maximum(t_next, t_floor_tensor)
 
-    return t_next, t_candidate, t_schedule
+    state.t = t_next.detach()
+    return t_next
 
 
-# --------------------------------------------------
-# Scope update gamma = Gamma(t)
-# --------------------------------------------------
+# ============================================================
+# Scope strategies
+# ============================================================
 
-def _update_scope(
-    t_next,               # (B,)
-    t0,
-    gamma_min=0.1,
-    gamma_max=10.0,
-    t_floor=0.0,
-    eps=1e-8,
-):
+def fixed_scope(
+    *,
+    t_curr: torch.Tensor,
+    gamma: float = 1.0,
+) -> torch.Tensor:
+    """
+    Fixed scope:
+        gamma_curr = gamma
+    """
+    return torch.full_like(t_curr, float(gamma))
+
+
+def dynamic_scope(
+    *,
+    t_curr: torch.Tensor,
+    gamma_min: float = 0.1,
+    gamma_max: float = 10.0,
+    t0: float = 1.0,
+    t_floor: float = 0.0,
+) -> torch.Tensor:
     """
     Dynamic scope:
-        gamma = gamma_min + (gamma_max - gamma_min) * (t0 - t) / (t0 - t_floor + eps)
-
-    Larger t -> smaller gamma -> broader exploration
-    Smaller t -> larger gamma -> more localized refinement
-
-    Returns:
-        gamma_next: (B,)
+        gamma(t) = gamma_min
+                 + (gamma_max - gamma_min)
+                   * (t0 - t) / (t0 - t_floor + eps)
     """
-    device = t_next.device
-    B = t_next.size(0)
-
-    if not torch.is_tensor(t0):
-        t0_tensor = torch.full((B,), float(t0), device=device, dtype=t_next.dtype)
-    else:
-        t0_tensor = t0.to(device=device, dtype=t_next.dtype).view(B)
-
-    gamma_next = (
-        gamma_min
-        + (gamma_max - gamma_min) * (t0_tensor - t_next) / (t0_tensor - t_floor + eps)
+    gamma_curr = gamma_min + (gamma_max - gamma_min) * (
+        float(t0) - t_curr
+    ) / (
+        float(t0) - float(t_floor) + 1e-8
     )
-    gamma_next = gamma_next.clamp(min=gamma_min, max=gamma_max)
-    return gamma_next
+
+    return gamma_curr.clamp(min=gamma_min, max=gamma_max)
 
 
-# --------------------------------------------------
-# Particle initialization
-# --------------------------------------------------
+# ============================================================
+# Langevin update
+# ============================================================
 
-def _init_particles(x, num_particles, epsilon, norm="linf", init="uniform"):
-    """
-    Initialize delta particles inside perturbation set B.
-
-    Args:
-        x:             (B, C, H, W)
-        num_particles: M
-        epsilon:       perturbation budget
-        norm:          "linf" or "l2"
-        init:          "uniform", "zero", or "normal"
-
-    Returns:
-        particles: (B, M, C, H, W)
-    """
-    device = x.device
-    B = x.size(0)
-    shape = (B, num_particles, *x.shape[1:])
-
-    if init == "zero":
-        delta = torch.zeros(shape, device=device, dtype=x.dtype)
-
-    elif init == "uniform":
-        if norm.lower() in ["linf", "l_inf", "l-infty", "l∞"]:
-            delta = torch.empty(shape, device=device, dtype=x.dtype).uniform_(-epsilon, epsilon)
-        elif norm.lower() in ["l2", "l_2"]:
-            delta = torch.randn(shape, device=device, dtype=x.dtype)
-            delta = _project_delta(delta.view(B * num_particles, *x.shape[1:]), epsilon, norm="l2")
-            delta = delta.view(shape)
-        else:
-            raise ValueError(f"Unsupported norm: {norm}")
-
-    elif init == "normal":
-        delta = 0.1 * epsilon * torch.randn(shape, device=device, dtype=x.dtype)
-        delta = _project_delta(delta.view(B * num_particles, *x.shape[1:]), epsilon, norm=norm)
-        delta = delta.view(shape)
-
-    else:
-        raise ValueError(f"Unsupported init mode: {init}")
-
-    return delta
-
-
-# --------------------------------------------------
-# Main region generator
-# --------------------------------------------------
-
-def region_generator(
+def langevin_update_local_entropy(
+    *,
+    state: ParticleState,
     model,
-    x,
-    y,
-    epsilon=8/255,
-    norm="linf",
-
-    # particle population
-    num_particles=8,
-    inner_steps=3,
-    init_mode="uniform",
-
-    # threshold update
-    t0=0.5,
-    q=0.4,
-    delta_min=0.01,
-    t_floor=0.0,
-    tau_decay=0.995,
-    step_idx=0,
-
-    # scope update
-    gamma_min=0.1,
-    gamma_max=10.0,
-
-    # thresholded energy
-    psi_type="softplus",
-    psi_alpha=10.0,
-
-    # Langevin
-    eta_delta=1e-2,
-    beta=1.0,
-    noise_scale=1.0,
-
-    # stateful warm start
-    state=None,
-
-    # return statistics
-    return_stats=True,
-):
+    x: torch.Tensor,
+    y: torch.Tensor,
+    t_curr: torch.Tensor,
+    gamma_curr: torch.Tensor,
+    energy_cfg: EnergyConfig,
+    cfg: LangevinConfig,
+) -> ParticleState:
     """
-    Region-aware local-Gibbs perturbation generator.
+    Explicit local-entropy Langevin update.
 
-    Pipeline:
-      1) maintain a single particle population {delta_i}
-      2) compute margins of current particles
-      3) update threshold t_k by minimum-of-three rule
-      4) update scope gamma_k using Gamma(t_k)
-      5) define local Gibbs potential:
-            U(u) = E_t(u; x, y) + gamma * 0.5||u - z_i||^2
-         with anchor z_i = delta_i^(k)
-      6) run projected Langevin dynamics for each particle
-      7) return x_adv = x + updated particles, plus updated state
+    Energy:
+        E_t(delta) = psi(m(x + delta, y) - t)
 
-    Args:
-        model: classifier
-        x: clean inputs, shape (B, C, H, W)
-        y: labels, shape (B,)
-        epsilon: perturbation budget
-        norm: "linf" or "l2"
+    Localization:
+        gamma / (2d) * ||delta - delta_0||^2
 
-        num_particles: number of particles M
-        inner_steps: number of Langevin steps L
-        init_mode: particle init mode if state is None
+    Gradient:
+        grad = grad_delta E_t(delta)
+               + gamma / d * (delta - delta_0)
 
-        t0: initial threshold
-        q: quantile level
-        delta_min: minimum decrease in threshold
-        t_floor: terminal threshold floor
-        tau_decay: global schedule coefficient
-        step_idx: outer iteration index for schedule
-
-        gamma_min, gamma_max: scope bounds
-
-        psi_type: "softplus" or "hinge"
-        psi_alpha: softplus steepness
-
-        eta_delta: inner step size
-        beta: inverse temperature
-        noise_scale: scale on Langevin noise
-
-        state: optional dict containing:
-            - "particles": (B, M, C, H, W)
-            - "t": (B,)
-          for warm-start
-
-    Returns:
-        x_adv:   (B, M, C, H, W)
-        stats:   dict or None
-        state:   updated state dict
-        p_bar:   (B, C) particle-averaged softmax, for outer KL objective
+    Update:
+        delta <- Proj[
+            delta - eta * grad + sqrt(2 eta / beta) * noise
+        ]
     """
-    device = x.device
-    B = x.size(0)
+    if state.particles is None:
+        raise RuntimeError("Particles are not initialized.")
 
-    if noise_scale < 0:
-        raise ValueError("noise_scale must be >= 0")
-    if inner_steps <= 0:
-        raise ValueError("inner_steps must be >= 1")
-    if num_particles <= 0:
-        raise ValueError("num_particles must be >= 1")
+    particles = state.particles
+    anchor = particles.detach().clone()
 
-    # --------------------------------------------------
-    # 0) Initialize / warm-start particles and threshold
-    # --------------------------------------------------
-    if state is not None and "particles" in state:
-        particles = state["particles"].detach().clone()   # (B, M, C, H, W)
-        if particles.shape[:2] != (B, num_particles):
-            raise ValueError(
-                f"state['particles'] shape mismatch: expected (B={B}, M={num_particles}, ...), "
-                f"got {tuple(particles.shape)}"
-            )
-    else:
-        particles = _init_particles(x, num_particles, epsilon, norm=norm, init=init_mode)
+    B, N, C, H, W = particles.shape
+    dim = C * H * W
 
-    if state is not None and "t" in state:
-        t_prev = state["t"].detach().clone().to(device=device, dtype=x.dtype).view(B)
-    else:
-        t_prev = torch.full((B,), float(t0), device=device, dtype=x.dtype)
+    x_rep = x.unsqueeze(1).expand(B, N, C, H, W)
+    y_rep = y.unsqueeze(1).expand(B, N).reshape(-1)
 
-    # --------------------------------------------------
-    # 1) Compute margins of current particles
-    # --------------------------------------------------
-    _was_training = model.training
-    model.eval()
-    with torch.no_grad():
-        x_adv_curr = _clamp_x_adv(x, particles)                          # (B, M, C, H, W)
-        logits_curr = model(x_adv_curr.view(B * num_particles, *x.shape[1:]))  # (B*M, C)
-        y_rep = y.unsqueeze(1).expand(B, num_particles).reshape(-1)     # (B*M,)
-        margins_curr = _margin(logits_curr, y_rep).view(B, num_particles)  # (B, M)
+    noise_std = cfg.noise_scale * (2.0 * cfg.step_size / cfg.beta) ** 0.5
 
-    # --------------------------------------------------
-    # 2) Threshold update
-    # --------------------------------------------------
-    t_next, t_candidate, t_schedule = _update_threshold(
-        margins=margins_curr,
-        t_prev=t_prev,
-        t0=t0,
-        step_idx=step_idx,
-        q=q,
-        delta_min=delta_min,
-        t_floor=t_floor,
-        tau_decay=tau_decay,
-    )  # all shape (B,)
+    for _ in range(cfg.steps):
+        particles_req = particles.detach().requires_grad_(True)
 
-    # --------------------------------------------------
-    # 3) Scope update
-    # --------------------------------------------------
-    gamma_next = _update_scope(
-        t_next=t_next,
-        t0=t0,
-        gamma_min=gamma_min,
-        gamma_max=gamma_max,
-        t_floor=t_floor,
-        eps=1e-8,
-    )  # (B,)
+        # Forward
+        x_adv = (x_rep + particles_req).clamp(0.0, 1.0)
+        logits = model(x_adv.reshape(B * N, C, H, W))
 
-    # --------------------------------------------------
-    # 4) Local-Gibbs-guided projected Langevin dynamics
-    # --------------------------------------------------
-    anchors = particles.detach().clone()  # z_i = delta_i^(k)
+        margins = margin(logits, y_rep).view(B, N)
 
-    for _ in range(inner_steps):
-        particles_req = particles.detach().clone().requires_grad_(True)   # (B,M,C,H,W)
+        # Energy
+        t_expand = t_curr.view(B, 1).expand(B, N)
 
-        # x + delta
-        x_adv = _clamp_x_adv(x, particles_req)                            # (B,M,C,H,W)
-        logits = model(x_adv.view(B * num_particles, *x.shape[1:]))       # (B*M,C)
-        margins = _margin(logits, y_rep).view(B, num_particles)           # (B,M)
-
-        # thresholded energy
-        t_expand = t_next.view(B, 1).expand(B, num_particles)             # (B,M)
-        energy = _threshold_energy(
-            margin=margins,
+        energy = threshold_energy(
+            margins=margins,
             t=t_expand,
-            psi_type=psi_type,
-            psi_alpha=psi_alpha,
-        )  # (B,M)
-
-        # localization term: 0.5 ||u - z_i||^2
-        diff = particles_req - anchors
-        local_term = 0.5 * diff.view(B, num_particles, -1).pow(2).sum(dim=2)  # (B,M)
-
-        # local Gibbs potential
-        gamma_expand = gamma_next.view(B, 1).expand(B, num_particles)     # (B,M)
-        potential = energy + gamma_expand * local_term                    # (B,M)
-
-        # gradient
-        loss = potential.sum()
-        grad = torch.autograd.grad(loss, particles_req)[0].detach()       # (B,M,C,H,W)
-
-        # Langevin noise
-        noise = torch.randn_like(particles_req) * noise_scale
-        particles = (
-            particles_req.detach()
-            - eta_delta * grad
-            + (2.0 * eta_delta / beta) ** 0.5 * noise
+            cfg=energy_cfg,
         )
 
-        # project back to perturbation set
-        particles = _project_delta(
-            particles.view(B * num_particles, *x.shape[1:]),
-            epsilon=epsilon,
-            norm=norm,
-        ).view(B, num_particles, *x.shape[1:])
+        # Gradient of energy part
+        grad_energy = torch.autograd.grad(
+            energy.sum(),
+            particles_req,
+            only_inputs=True,
+        )[0]
 
-    # --------------------------------------------------
-    # 5) Build x_adv and empirical predictive summary
-    # --------------------------------------------------
-    x_adv = _clamp_x_adv(x, particles)                                   # (B,M,C,H,W)
+        # Explicit localization gradient
+        gamma_expand = gamma_curr.view(B, 1, 1, 1, 1)
+        grad_local = gamma_expand * (particles_req - anchor) / dim
 
-    # Optional predictive summary (not used directly here, but useful for outer KL regularization)
-    logits_final = model(x_adv.view(B * num_particles, *x.shape[1:]))    # (B*M,C)
-    probs_final = F.softmax(logits_final, dim=1).view(B, num_particles, -1)  # (B,M,C)
-    p_bar = probs_final.mean(dim=1)                                      # (B,C)
+        grad = grad_energy + grad_local
 
-    # --------------------------------------------------
-    # 6) Save updated state
-    # --------------------------------------------------
-    state_out = {
-        "particles": particles.detach(),
-        "t": t_next.detach(),
-    }
+        # Langevin update
+        noise = torch.randn_like(particles_req)
 
-    # --------------------------------------------------
-    # 7) Return stats if requested
-    # --------------------------------------------------
-    stats = None
-    if return_stats:
-        # final margins after inner dynamics
-        final_margins = _margin(logits_final, y_rep).view(B, num_particles)
+        particles_next = (
+            particles_req
+            - cfg.step_size * grad
+            + noise_std * noise
+        )
 
-        # particle spread around anchor / mean
-        spread_anchor = (particles - anchors).view(B, num_particles, -1).norm(p=2, dim=2).mean()
+        particles = state.project(particles_next.detach(), x)
 
-        particle_mean = particles.mean(dim=1, keepdim=True)  # (B,1,C,H,W)
-        spread_center = (particles - particle_mean).view(B, num_particles, -1).norm(p=2, dim=2).mean()
+    state.particles = particles.detach()
+    state.update_x_adv(x)
+    state.step_idx += 1
 
-        stats = {
-            # threshold stats
-            "t_prev_mean": t_prev.mean().detach(),
-            "t_candidate_mean": t_candidate.mean().detach(),
-            "t_schedule_mean": t_schedule.mean().detach(),
-            "t_next_mean": t_next.mean().detach(),
+    return state
 
-            # scope stats
-            "gamma_mean": gamma_next.mean().detach(),
-            "gamma_min_batch": gamma_next.min().detach(),
-            "gamma_max_batch": gamma_next.max().detach(),
 
-            # margin stats
-            "margin_curr_mean": margins_curr.mean().detach(),
-            "margin_final_mean": final_margins.mean().detach(),
-            "margin_final_min": final_margins.min().detach(),
-            "margin_final_q": torch.quantile(final_margins, q=q).detach(),
+# ============================================================
+# Outer TRADES-style loss
+# ============================================================
 
-            # energy / geometry stats
-            "p_bar_entropy": (-p_bar * torch.log(p_bar.clamp_min(1e-12))).sum(dim=1).mean().detach(),
-            "spread_anchor": spread_anchor.detach(),
-            "spread_center": spread_center.detach(),
-        }
+def local_entropy_trades_loss(
+    *,
+    model,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    state: ParticleState,
+    criterion,
+    beta_outer: float = 6.0,
+) -> torch.Tensor:
+    """
+    TRADES-style outer loss using state.x_adv.
 
-    if _was_training:
-        model.train()
+    L = CE(f(x), y)
+        + beta_outer * E_delta KL(
+              p_clean(. | x) || p_adv(. | x + delta)
+          )
+    """
+    if state.x_adv is None:
+        raise RuntimeError("state.x_adv is None. Run particle update first.")
 
-    return x_adv.detach(), stats, state_out, p_bar
+    x_adv_particles = state.x_adv
+    B, N, C, H, W = x_adv_particles.shape
+
+    logits_clean = model(x)
+    loss_natural = criterion(logits_clean, y)
+
+    with torch.no_grad():
+        p_clean = F.softmax(logits_clean, dim=1)
+
+    logits_adv = model(x_adv_particles.reshape(B * N, C, H, W))
+    log_p_adv = F.log_softmax(logits_adv, dim=1)
+
+    p_clean_rep = p_clean.unsqueeze(1).expand(B, N, -1)
+    p_clean_rep = p_clean_rep.reshape(B * N, -1)
+
+    loss_robust = F.kl_div(
+        log_p_adv,
+        p_clean_rep,
+        reduction="batchmean",
+    )
+
+    loss = loss_natural + beta_outer * loss_robust
+
+    return loss

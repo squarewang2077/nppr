@@ -1,0 +1,8 @@
+{
+    "reportArgumentType": "none",
+    "reportOptionalMemberAccess": "none",
+    "reportRedeclaration": "none",
+    "reportOptionalIterable": "none",
+    "reportReturnType": "none",
+    "reportCallIssue": "none"
+}

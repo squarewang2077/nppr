@@ -109,6 +109,7 @@ import pandas as pd
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
 from src.adv_attacker import pgd_at_loss, trades_loss
+from src.local_entropy4pr import LocalEntropyGenerator, local_entropy_trades_loss
 from src.langevin4pr import pr_generator
 from utils import build_sigma_list
 
@@ -179,6 +180,7 @@ def train_one_epoch(model, loader, optimizer, device, criterion,
 
 def train_one_epoch_adv(model, loader, optimizer, device, criterion,
                         adv_config,
+                        loc_ent_gen=None,
                         epoch=None, total_epochs=None):
     """
     Adversarial training loop (outer loop).
@@ -205,8 +207,19 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
         # Compute adversarial loss (inner loop + outer loss)
         if adv_type == "adv_pgd":
             loss, x_adv = pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion, norm=norm)
+            x_eval = x_adv
         elif adv_type == "trades":
             loss, x_adv = trades_loss(model, x, y, epsilon, alpha, num_steps, beta, criterion, norm=norm)
+            x_eval = x_adv
+        elif adv_type == "loc_ent":
+            loss, x_adv, _, _ = local_entropy_trades_loss(
+                model, x, y,
+                generator=loc_ent_gen,
+                criterion=criterion,
+                beta_outer=beta,
+                return_stats=False,
+            )
+            x_eval = x_adv[:, 0]  # first particle as robust accuracy proxy
         else:
             raise ValueError(f"Unknown adv_type: {adv_type}")
 
@@ -218,7 +231,7 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
 
         model.eval()
         with torch.no_grad():
-            preds = model(x_adv).argmax(dim=1)
+            preds = model(x_eval).argmax(dim=1)
             running_correct += (preds == y).sum().item()
         model.train()
 
@@ -336,8 +349,8 @@ def main():
     ap.add_argument("--img_size", type=int, default=None,
                     help="Input image size (will be resized if dataset images are different)")
     # Training Method  
-    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades", "pr"], default="adv_pgd",
-                    help="Training method: standard, adv_pgd (PGD-AT), trades (TRADES), pr (PR)")
+    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades", "loc_ent", "pr"], default="adv_pgd",
+                    help="Training method: standard, adv_pgd (PGD-AT), trades (TRADES), loc_ent (Local-Entropy), pr (PR)")
     
     # Adversarial Training Settings (for PGD-AT and TRADES)
     ap.add_argument("--norm", choices=["linf", "l2"], default="linf",
@@ -349,7 +362,24 @@ def main():
     ap.add_argument("--num_steps", type=int, default=10,
                     help="Number of PGD steps")
     ap.add_argument("--beta", type=float, default=6.0,
-                    help="TRADES regularization weight")
+                    help="TRADES / Local-Entropy KL regularization weight")
+
+    # Local-Entropy Training Settings (for loc_ent)
+    ap.add_argument("--num_particles",     type=int,   default=8,
+                    help="Number of Langevin particles per sample (loc_ent)")
+    ap.add_argument("--langevin_steps",    type=int,   default=5,
+                    help="Inner Langevin steps per call (loc_ent)")
+    ap.add_argument("--loc_ent_step_size", type=float, default=1e-2,
+                    help="Langevin inner step size (loc_ent)")
+    ap.add_argument("--loc_ent_gamma",     type=float, default=1.0,
+                    help="Localization strength; higher keeps particles near their anchor (loc_ent)")
+    ap.add_argument("--ema_alpha",         type=float, default=0.2,
+                    help="EMA weight for trajectory predictive summaries (loc_ent)")
+    ap.add_argument("--burn_in",           type=int,   default=1,
+                    help="Langevin steps before EMA updates begin (loc_ent)")
+    ap.add_argument("--init_dist",         type=str,   default="uniform",
+                    choices=["zero", "gaussian", "normal", "uniform", "warm"],
+                    help="Particle initialization strategy (loc_ent)")
 
     # PR Training Settings (for PR)
     ap.add_argument("--beta_mix", type=float, default=1,
@@ -405,6 +435,11 @@ def main():
     elif args.training_type == "trades":
         logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm} "
                     f"alpha={args.alpha:.4f}, num_steps={args.num_steps}, beta={args.beta}")
+    elif args.training_type == "loc_ent":
+        logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm}")
+        logger.info(f"         gamma={args.loc_ent_gamma}, beta={args.beta}")
+        logger.info(f"         num_particles={args.num_particles}, langevin_steps={args.langevin_steps}, step_size={args.loc_ent_step_size}")
+        logger.info(f"         noise_scale={args.noise_scale}, ema_alpha={args.ema_alpha}, burn_in={args.burn_in}, init_dist={args.init_dist}")
     elif args.training_type == "pr":
         logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm}")
         logger.info(f"         beta_mix={args.beta_mix}, kappa={args.kappa}")
@@ -463,13 +498,38 @@ def main():
 
     # Adversarial config
     adv_config = {
-        "type": args.training_type,
-        "norm": args.norm,
-        "epsilon": args.epsilon,
-        "alpha": args.alpha,
+        "type":      args.training_type,
+        "norm":      args.norm,
+        "epsilon":   args.epsilon,
+        "alpha":     args.alpha,
         "num_steps": args.num_steps,
-        "beta": args.beta,
+        "beta":      args.beta,
+        # loc_ent keys (ignored by adv_pgd / trades branches)
+        "gamma":         args.loc_ent_gamma,
+        "num_particles": args.num_particles,
+        "langevin_steps":args.langevin_steps,
+        "step_size":     args.loc_ent_step_size,
+        "noise_scale":   args.noise_scale,
+        "ema_alpha":     args.ema_alpha,
+        "burn_in":       args.burn_in,
+        "init_dist":     args.init_dist,
     }
+
+    # Local-Entropy generator (constructed once so state persists across epochs)
+    loc_ent_gen = None
+    if args.training_type == "loc_ent":
+        loc_ent_gen = LocalEntropyGenerator(
+            epsilon=args.epsilon,
+            norm=args.norm,
+            gamma=args.loc_ent_gamma,
+            num_particles=args.num_particles,
+            langevin_steps=args.langevin_steps,
+            step_size=args.loc_ent_step_size,
+            noise_scale=args.noise_scale,
+            ema_alpha=args.ema_alpha,
+            burn_in=args.burn_in,
+            init_dist=args.init_dist,
+        )
 
     # PR config
     sigma_list = build_sigma_list(epsilon=args.epsilon, K=args.K, mode_type=args.sigma_dist_type)
@@ -502,8 +562,9 @@ def main():
         if args.training_type == "standard":
             train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, device, criterion,
                                                     epoch=ep, total_epochs=args.epochs)
-        elif args.training_type in ["adv_pgd", "trades"]:
+        elif args.training_type in ["adv_pgd", "trades", "loc_ent"]:
             train_loss, train_acc = train_one_epoch_adv(model, train_loader, optimizer, device, criterion, adv_config,
+                                                        loc_ent_gen=loc_ent_gen,
                                                         epoch=ep, total_epochs=args.epochs)
         elif args.training_type == "pr":
             train_loss, train_acc, avg_stats = train_one_epoch_pr(model, train_loader, optimizer, device, criterion, pr_config,
@@ -586,7 +647,7 @@ def main():
         "training_type": args.training_type,
         "model_state": model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
     }
-    if args.training_type in ["adv_pgd", "trades"]:
+    if args.training_type in ["adv_pgd", "trades", "loc_ent"]:
         ckpt["adv_config"] = adv_config
     elif args.training_type == "pr":
         ckpt["pr_config"] = pr_config
