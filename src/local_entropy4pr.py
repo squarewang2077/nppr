@@ -19,7 +19,7 @@ class EnergyConfig:
 class LangevinConfig:
     steps: int = 5
     step_size: float = 1e-2
-    beta: float = 1.0
+    beta: float = 100
     noise_scale: float = 1.0
 
 
@@ -39,11 +39,10 @@ class ParticleState:
     """
 
     def __init__(
-        self,
-        epsilon: float,
-        norm: str = "linf",
-        num_particles: int = 8,
-    ):
+            self, epsilon: float, 
+            norm: str = "linf",
+            num_particles: int = 8
+        ):
         self.epsilon = float(epsilon)
         self.norm = norm.lower()
         self.num_particles = int(num_particles)
@@ -58,18 +57,20 @@ class ParticleState:
         self.step_idx: int = 0
 
     def init_particles(
-        self,
-        x: torch.Tensor,
-        method: str = "uniform",
-        scale: Optional[float] = None,
-        warm_start: bool = False,
-    ) -> torch.Tensor:
+            self, x: torch.Tensor,
+            method: str = "uniform",
+            scale: Optional[float] = None,
+            warm_start: bool = False
+            ) -> torch.Tensor:
         """
         Initialize or reuse perturbation particles.
         """
         B, C, H, W = x.shape
         shape = (B, self.num_particles, C, H, W)
 
+        # reuse particles but it is not strictly correct! 
+        # neet to refine this in the future.
+        # generally not use it before refinement.
         if warm_start and self.particles is not None:
             if tuple(self.particles.shape) == shape:
                 self.particles = self.particles.detach().clone().to(
@@ -79,21 +80,39 @@ class ParticleState:
                 self.update_x_adv(x)
                 return self.particles
 
+        # if sacle is none, set it to eps
+        # however, in practice, we always set a scale
         if scale is None:
             scale = self.epsilon
 
         if method == "zero":
-            particles = torch.zeros(shape, device=x.device, dtype=x.dtype)
+            particles = torch.zeros(
+                shape, 
+                device=x.device, 
+                dtype=x.dtype
+            )
 
         elif method == "uniform":
             if self.norm == "linf":
-                particles = torch.empty(shape, device=x.device, dtype=x.dtype)
+                particles = torch.empty(
+                    shape, 
+                    device=x.device, 
+                    dtype=x.dtype
+                )
                 particles.uniform_(-self.epsilon, self.epsilon)
-            else:
-                particles = torch.randn(shape, device=x.device, dtype=x.dtype) * scale
+            else: # this is for L2
+                particles = torch.randn(
+                    shape, 
+                    device=x.device, 
+                    dtype=x.dtype
+                ) * scale
 
         elif method == "gaussian":
-            particles = torch.randn(shape, device=x.device, dtype=x.dtype) * scale
+            particles = torch.randn(
+                shape, 
+                device=x.device, 
+                dtype=x.dtype
+                ) * scale
 
         else:
             raise ValueError("method must be 'zero', 'uniform', or 'gaussian'.")
@@ -104,10 +123,10 @@ class ParticleState:
         return self.particles
 
     def project(
-        self,
-        particles: torch.Tensor,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+            self, 
+            particles: torch.Tensor, 
+            x: torch.Tensor
+        ) -> torch.Tensor:
         """
         Project particles into:
             ||delta|| <= epsilon
@@ -164,7 +183,10 @@ class ParticleState:
 # Basic functions
 # ============================================================
 
-def margin(logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+def margin(
+        logits: torch.Tensor, 
+        y: torch.Tensor
+    ) -> torch.Tensor:
     """
     Multiclass margin:
         m(x, y) = h_y(x) - max_{j != y} h_j(x)
@@ -179,10 +201,10 @@ def margin(logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 
 def threshold_energy(
-    margins: torch.Tensor,
-    t: torch.Tensor,
-    cfg: EnergyConfig,
-) -> torch.Tensor:
+        margins: torch.Tensor, 
+        t: torch.Tensor,
+        cfg: EnergyConfig
+    ) -> torch.Tensor:
     """
     Thresholded margin energy:
         E_t(m) = psi(m - t)
@@ -200,12 +222,12 @@ def threshold_energy(
 
 @torch.no_grad()
 def compute_margins(
-    *,
-    model,
-    x: torch.Tensor,
-    y: torch.Tensor,
-    state: ParticleState,
-) -> torch.Tensor:
+        *, 
+        model, 
+        x: torch.Tensor, 
+        y: torch.Tensor,
+        state: ParticleState
+    ) -> torch.Tensor:
     """
     Compute margins for current particles.
     """
@@ -228,11 +250,11 @@ def compute_margins(
 # ============================================================
 
 def fixed_threshold_update(
-    *,
-    margins: torch.Tensor,
-    state: ParticleState,
-    t: float = 0.0,
-) -> torch.Tensor:
+        *, 
+        margins: torch.Tensor, 
+        state: ParticleState, 
+        t: float = 0.0
+    ) -> torch.Tensor:
     """
     Fixed threshold:
         t_curr = t
@@ -251,21 +273,21 @@ def fixed_threshold_update(
 
 
 def adaptive_threshold_update(
-    *,
-    margins: torch.Tensor,
-    state: ParticleState,
-    t0: float,
-    t_floor: float = 0.0,
-    q: float = 0.4,
-    delta_min: float = 0.01,
-    decay: float = 0.995,
-) -> torch.Tensor:
+        *, 
+        margins: torch.Tensor, 
+        state: ParticleState,
+        t0: float,
+        t_floor: float = 0.0,
+        q: float = 0.4,
+        delta_min: float = 0.01,
+        decay: float = 0.995
+    ) -> torch.Tensor:
     """
     Adaptive threshold:
         t_next = min(
-            t_prev - delta_min,
-            quantile_q(margins),
-            t0 * decay^(step_idx + 1)
+            t_prev - delta_min, = t_1
+            quantile_q(margins), = t_2
+            t0 * decay^(step_idx + 1) = t_3
         )
         t_next = max(t_floor, t_next)
     """
@@ -274,33 +296,20 @@ def adaptive_threshold_update(
     dtype = margins.dtype
 
     if state.t is not None and state.t.shape == (B,):
-        t_prev = state.t.to(device=device, dtype=dtype)
+        t_prev = state.t.to(device=device, dtype=dtype) # t from last step
     else:
-        t_prev = torch.full((B,), float(t0), device=device, dtype=dtype)
+        t_prev = torch.full((B,), float(t0), device=device, dtype=dtype) # t0 for first step
 
-    t_candidate = torch.quantile(margins.detach(), q=q, dim=1)
-    t_progress = t_prev - delta_min
+    t1 = t_prev - delta_min
+    t2 = torch.quantile(margins.detach(), q=q, dim=1) # (B,)
 
-    t_schedule_value = max(
-        float(t_floor),
-        float(t0) * (decay ** (state.step_idx + 1)),
-    )
-    t_schedule = torch.full(
-        (B,),
-        t_schedule_value,
-        device=device,
-        dtype=dtype,
-    )
+    _t3 = max(float(t_floor), float(t0) * (decay ** (state.step_idx + 1)))
+    t3 = torch.full((B,), _t3, device=device, dtype=dtype)
 
-    t_next = torch.minimum(t_progress, t_candidate)
-    t_next = torch.minimum(t_next, t_schedule)
+    t_next = torch.minimum(t1, t2)
+    t_next = torch.minimum(t_next, t3)
 
-    t_floor_tensor = torch.full(
-        (B,),
-        float(t_floor),
-        device=device,
-        dtype=dtype,
-    )
+    t_floor_tensor = torch.full((B,), float(t_floor), device=device, dtype=dtype)
     t_next = torch.maximum(t_next, t_floor_tensor)
 
     state.t = t_next.detach()
@@ -312,10 +321,10 @@ def adaptive_threshold_update(
 # ============================================================
 
 def fixed_scope(
-    *,
-    t_curr: torch.Tensor,
-    gamma: float = 1.0,
-) -> torch.Tensor:
+        *,
+        t_curr: torch.Tensor,
+        gamma: float = 1.0,
+    ) -> torch.Tensor:
     """
     Fixed scope:
         gamma_curr = gamma
@@ -324,13 +333,13 @@ def fixed_scope(
 
 
 def dynamic_scope(
-    *,
-    t_curr: torch.Tensor,
-    gamma_min: float = 0.1,
-    gamma_max: float = 10.0,
-    t0: float = 1.0,
-    t_floor: float = 0.0,
-) -> torch.Tensor:
+        *,
+        t_curr: torch.Tensor,
+        gamma_min: float = 0.1,
+        gamma_max: float = 10.0,
+        t0: float = 1.0,
+        t_floor: float = 0.0,
+    ) -> torch.Tensor:
     """
     Dynamic scope:
         gamma(t) = gamma_min
@@ -338,10 +347,7 @@ def dynamic_scope(
                    * (t0 - t) / (t0 - t_floor + eps)
     """
     gamma_curr = gamma_min + (gamma_max - gamma_min) * (
-        float(t0) - t_curr
-    ) / (
-        float(t0) - float(t_floor) + 1e-8
-    )
+        float(t0) - t_curr) / ( float(t0) - float(t_floor) + 1e-8)
 
     return gamma_curr.clamp(min=gamma_min, max=gamma_max)
 
@@ -351,29 +357,26 @@ def dynamic_scope(
 # ============================================================
 
 def langevin_update_local_entropy(
-    *,
-    state: ParticleState,
-    model,
-    x: torch.Tensor,
-    y: torch.Tensor,
-    t_curr: torch.Tensor,
-    gamma_curr: torch.Tensor,
-    energy_cfg: EnergyConfig,
-    cfg: LangevinConfig,
-) -> ParticleState:
+        *,
+        state: ParticleState,
+        model,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        t_curr: torch.Tensor,
+        gamma_curr: torch.Tensor,
+        energy_cfg: EnergyConfig,
+        cfg: LangevinConfig,
+    ) -> ParticleState:
     """
     Explicit local-entropy Langevin update.
-
     Energy:
         E_t(delta) = psi(m(x + delta, y) - t)
-
     Localization:
         gamma / (2d) * ||delta - delta_0||^2
 
     Gradient:
         grad = grad_delta E_t(delta)
                + gamma / d * (delta - delta_0)
-
     Update:
         delta <- Proj[
             delta - eta * grad + sqrt(2 eta / beta) * noise
@@ -447,14 +450,14 @@ def langevin_update_local_entropy(
 # ============================================================
 
 def local_entropy_trades_loss(
-    *,
-    model,
-    x: torch.Tensor,
-    y: torch.Tensor,
-    state: ParticleState,
-    criterion,
-    beta_outer: float = 6.0,
-) -> torch.Tensor:
+        *,
+        model,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        state: ParticleState,
+        criterion,
+        beta_outer: float = 6.0,
+    ) -> torch.Tensor:
     """
     TRADES-style outer loss using state.x_adv.
 

@@ -1,9 +1,8 @@
-# train_classifiers.py - Train image classifiers with standard, adversarial, or
-#                        probabilistic robustness (PR) training.
+# train_classifiers.py - Train image classifiers with standard or adversarial training.
 #
 # Description:
 #   This script trains an image classifier on CIFAR-10, CIFAR-100, or
-#   TinyImageNet using one of four training methods:
+#   TinyImageNet using one of three training methods:
 #
 #     standard   - Vanilla cross-entropy training on clean images.
 #     adv_pgd    - PGD adversarial training (Madry et al.).
@@ -12,10 +11,6 @@
 #     trades     - TRADES adversarial training (Zhang et al.).
 #                  Adds a KL-divergence regularisation term between clean
 #                  and adversarial logits controlled by --beta.
-#     pr         - Probabilistic Robustness training.
-#                  Perturbations are sampled from a Langevin-based mixture
-#                  of Gaussians (pr_generator); the model is trained over
-#                  N perturbation samples per image.
 #
 #   For every training run the script saves:
 #     <save_dir>/<arch>_<dataset>_<training_type>.pth          model checkpoint
@@ -24,7 +19,7 @@
 #
 #   Evaluation is run every 5 epochs on a fixed subset of the training set
 #   (same size as the test set) and the full test set, reporting clean
-#   accuracy and PR-attack robust accuracy for both splits.
+#   accuracy for both splits.
 #
 # Requirements:
 #   torch >= 2.0
@@ -37,8 +32,6 @@
 #   arch/                       model registry and NormalizedModel wrapper
 #   utils/preprocess_data.py    dataset loading and preprocessing
 #   src/adv_attacker.py         PGD-AT and TRADES loss functions
-#   src/langevin4pr.py          PR perturbation generator
-#   configs/train_clf_cfg.py    sigma schedule builder for PR
 #
 # Usage:
 #   python scripts/train_classifiers.py [options]
@@ -48,7 +41,7 @@
 #   --arch          {resnet18, resnet50, wide_resnet50_2, vgg16,
 #                    densenet121, mobilenet_v3_large,
 #                    efficientnet_b0, vit_b_16}         (default: resnet18)
-#   --training_type {standard, adv_pgd, trades, pr}    (default: adv_pgd)
+#   --training_type {standard, adv_pgd, trades}        (default: adv_pgd)
 #   --epochs        number of training epochs           (default: 50)
 #   --batch_size    mini-batch size                     (default: 128)
 #   --lr            initial learning rate               (default: 0.1)
@@ -60,16 +53,6 @@
 #   --alpha         PGD step size                       (default: 2/255)
 #   --num_steps     number of PGD steps                 (default: 10)
 #   --beta          TRADES regularisation weight        (default: 6.0)
-#
-#   PR specific:
-#   --K             number of MoG components            (default: 3)
-#   --beta_mix      CE / soft-0-1 interpolation weight  (default: 1)
-#   --kappa         margin surrogate softness           (default: 0.02)
-#   --num_samples   perturbation samples per image      (default: 32)
-#   --fisher_damping diagonal Fisher damping            (default: 1e-7)
-#   --tau           Langevin temperature                (default: 1e-4)
-#   --noise_scale   posterior sampling noise scale      (default: 1.0)
-#   --sigma_dist_type sigma schedule type               (default: geometric)
 #
 # Examples:
 #   # Standard training on CIFAR-10 with ResNet-18
@@ -84,12 +67,12 @@
 #       --epsilon 0.03137 --alpha 0.00784 --num_steps 10 \
 #       --epochs 100 --save_dir ./ckp/adv_training
 #
-#   # PR training on CIFAR-100 with WideResNet-50-2
+#   # TRADES adversarial training on CIFAR-100 with WideResNet-50-2
 #   python scripts/train_classifiers.py \
 #       --dataset cifar100 --arch wide_resnet50_2 \
-#       --training_type pr \
-#       --K 3 --num_samples 16 --epochs 50 \
-#       --save_dir ./ckp/pr_training
+#       --training_type trades \
+#       --epsilon 0.03137 --alpha 0.00784 --num_steps 10 --beta 6.0 \
+#       --epochs 100 --save_dir ./ckp/adv_training
 
 import os
 import logging
@@ -109,9 +92,6 @@ import pandas as pd
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
 from src.adv_attacker import pgd_at_loss, trades_loss
-from src.local_entropy4pr import LocalEntropyGenerator, local_entropy_trades_loss
-from src.langevin4pr import pr_generator
-from utils import build_sigma_list
 
 def setup_logger(log_path: str) -> logging.Logger:
     """Return a logger that writes to both stdout and *log_path*."""
@@ -180,11 +160,10 @@ def train_one_epoch(model, loader, optimizer, device, criterion,
 
 def train_one_epoch_adv(model, loader, optimizer, device, criterion,
                         adv_config,
-                        loc_ent_gen=None,
                         epoch=None, total_epochs=None):
     """
     Adversarial training loop (outer loop).
-    Inner loop (attack generation) is handled by ad_attacker functions.
+    Inner loop (attack generation) is handled by adv_attacker functions.
     train_acc is measured on adversarial examples (robust training accuracy).
     """
     model.train()
@@ -211,15 +190,6 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
         elif adv_type == "trades":
             loss, x_adv = trades_loss(model, x, y, epsilon, alpha, num_steps, beta, criterion, norm=norm)
             x_eval = x_adv
-        elif adv_type == "loc_ent":
-            loss, x_adv, _, _ = local_entropy_trades_loss(
-                model, x, y,
-                generator=loc_ent_gen,
-                criterion=criterion,
-                beta_outer=beta,
-                return_stats=False,
-            )
-            x_eval = x_adv[:, 0]  # first particle as robust accuracy proxy
         else:
             raise ValueError(f"Unknown adv_type: {adv_type}")
 
@@ -242,89 +212,7 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
     return running_loss / len(loader.dataset), running_correct / len(loader.dataset)
 
 # ------------------------------------------------------------------
-#                    Probabilistic Training For One Epoch
-# ------------------------------------------------------------------
-
-def train_one_epoch_pr(model, loader, optimizer, device, criterion,
-                        pr_config,
-                        epoch=None, total_epochs=None):
-    """
-    Probabilistic (PR / Bayesian) training loop.
-
-    pr_config keys:
-        norm          : "linf" | "l2" (default "linf")
-        epsilon       : perturbation budget radius (default 8/255)
-
-        kappa         : float > 0, margin surrogate softness (default 1.0)
-        beta_mix      : float in [0,1], interpolation CE <-> soft-0-1 (default 0.5)
-        
-        K             : number of MoG components (default 2)
-        fisher_damping: diagonal Fisher damping (default 1e-4)
-       
-        tau           : temperature > 0 (default 1.0)
-        noise_scale   : posterior sampling noise scale (default 1.0)
-
-        loss = beta_pr_loss(x_adv)
-    """
-
-    model.train()
-    running_loss = 0.0
-    running_correct = 0
-    total_samples = 0
-    pbar = tqdm(loader, desc=f"PR Train [{epoch}/{total_epochs}]" if epoch else "PR Training", leave=False)
-
-    # Extract generator kwargs (exclude "type")
-    generator_kwargs = {k: v for k, v in pr_config.items() if k != "type"}
-
-    # stats accumulators
-    stat_sums = {"D_mu": 0.0, "D_sig": 0.0, "D_proxy": 0.0, "pi_entropy": 0.0, "pi_max": 0.0}
-    stat_count = 0  # number of batches (or you can weight by batch size)
-
-    for x, y in pbar:
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        optimizer.zero_grad(set_to_none=True)
-
-        # Adversarial beta-mixed loss only
-        x_adv, stats = pr_generator(model, x, y, **generator_kwargs, return_stats=True)
-
-        # x_adv: (B, N, C, H, W)
-        B, N = x_adv.shape[0], x_adv.shape[1]
-
-        x_adv_flat = x_adv.view(B * N, *x_adv.shape[2:])      # (B*N, C, H, W)
-        y_rep = y.repeat_interleave(N)                         # (B*N,)
-
-        logits = model(x_adv_flat)                             # (B*N, num_classes)
-        loss = criterion(logits, y_rep)
-
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item() * y.size(0)   # criterion averages over B*N; normalise by original batch size B
-        total_samples += y.size(0)
-
-        # runing correct
-        with torch.no_grad():
-            preds = logits.argmax(dim=1)
-            running_correct += (preds == y_rep).sum().item()
-
-        # accumulate stats (detach already done)
-        for k in stat_sums:
-            stat_sums[k] += float(stats[k].item())
-        stat_count += 1
-
-        avg_loss = running_loss / total_samples
-        avg_stats = {k: stat_sums[k] / stat_count for k in stat_sums}
-        train_acc = running_correct / (total_samples * N)
-        
-        pbar.set_postfix(loss=f"{avg_loss:.4f}", 
-                         D=f"{avg_stats['D_proxy']:.3e}", 
-                         Hpi=f"{avg_stats['pi_entropy']:.3f}", 
-                         acc=f"{train_acc:.4f}")
-
-    return running_loss / len(loader.dataset), train_acc, avg_stats
-
-# ------------------------------------------------------------------
-#                           Main Function 
+#                           Main Function
 # ------------------------------------------------------------------
 
 def main():
@@ -348,13 +236,13 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=5e-4)
     ap.add_argument("--img_size", type=int, default=None,
                     help="Input image size (will be resized if dataset images are different)")
-    # Training Method  
-    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades", "loc_ent", "pr"], default="adv_pgd",
-                    help="Training method: standard, adv_pgd (PGD-AT), trades (TRADES), loc_ent (Local-Entropy), pr (PR)")
-    
+    # Training Method
+    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades"], default="adv_pgd",
+                    help="Training method: standard, adv_pgd (PGD-AT), trades (TRADES)")
+
     # Adversarial Training Settings (for PGD-AT and TRADES)
     ap.add_argument("--norm", choices=["linf", "l2"], default="linf",
-                    help="Norm for adversarial perturbations (for PGD-AT, TRADES, and PR)")
+                    help="Norm for adversarial perturbations (for PGD-AT and TRADES)")
     ap.add_argument("--epsilon", type=float, default=8/255,
                     help="Perturbation budget")
     ap.add_argument("--alpha", type=float, default=2/255,
@@ -362,44 +250,7 @@ def main():
     ap.add_argument("--num_steps", type=int, default=10,
                     help="Number of PGD steps")
     ap.add_argument("--beta", type=float, default=6.0,
-                    help="TRADES / Local-Entropy KL regularization weight")
-
-    # Local-Entropy Training Settings (for loc_ent)
-    ap.add_argument("--num_particles",     type=int,   default=8,
-                    help="Number of Langevin particles per sample (loc_ent)")
-    ap.add_argument("--langevin_steps",    type=int,   default=5,
-                    help="Inner Langevin steps per call (loc_ent)")
-    ap.add_argument("--loc_ent_step_size", type=float, default=1e-2,
-                    help="Langevin inner step size (loc_ent)")
-    ap.add_argument("--loc_ent_gamma",     type=float, default=1.0,
-                    help="Localization strength; higher keeps particles near their anchor (loc_ent)")
-    ap.add_argument("--ema_alpha",         type=float, default=0.2,
-                    help="EMA weight for trajectory predictive summaries (loc_ent)")
-    ap.add_argument("--burn_in",           type=int,   default=1,
-                    help="Langevin steps before EMA updates begin (loc_ent)")
-    ap.add_argument("--init_dist",         type=str,   default="uniform",
-                    choices=["zero", "gaussian", "normal", "uniform", "warm"],
-                    help="Particle initialization strategy (loc_ent)")
-
-    # PR Training Settings (for PR)
-    ap.add_argument("--beta_mix", type=float, default=1,
-                    help="Beta mix parameter for PR")
-    ap.add_argument("--kappa", type=float, default=0.02,
-                    help="Kappa parameter for PR")
-    
-    ap.add_argument("--K", type=int, default=3,
-                    help="Number of mixture components for PR")
-    ap.add_argument("--sigma_dist_type", type=str, default="geometric",
-                    help="Type of sigma distribution for PR")
-    ap.add_argument("--fisher_damping", type=float, default=1e-7,
-                    help="Fisher diagonal damping for PR")
-    ap.add_argument("--tau", type=float, default=1e-4,
-                    help="Temperature for PR")
-
-    ap.add_argument("--num_samples", type=int, default=3,
-                    help="Number of perturbation samples per input for PR")
-    ap.add_argument("--noise_scale", type=float, default=1.0,
-                    help="Posterior sampling noise scale for PR")   
+                    help="TRADES KL regularization weight")
 
     # Misc
     ap.add_argument("--seed", type=int, default=42)
@@ -435,16 +286,6 @@ def main():
     elif args.training_type == "trades":
         logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm} "
                     f"alpha={args.alpha:.4f}, num_steps={args.num_steps}, beta={args.beta}")
-    elif args.training_type == "loc_ent":
-        logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm}")
-        logger.info(f"         gamma={args.loc_ent_gamma}, beta={args.beta}")
-        logger.info(f"         num_particles={args.num_particles}, langevin_steps={args.langevin_steps}, step_size={args.loc_ent_step_size}")
-        logger.info(f"         noise_scale={args.noise_scale}, ema_alpha={args.ema_alpha}, burn_in={args.burn_in}, init_dist={args.init_dist}")
-    elif args.training_type == "pr":
-        logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm}")
-        logger.info(f"         beta_mix={args.beta_mix}, kappa={args.kappa}")
-        logger.info(f"         K={args.K}, sigma_dist_type={args.sigma_dist_type}, fisher_damping={args.fisher_damping}, tau={args.tau}")
-        logger.info(f"         num_samples={args.num_samples}, noise_scale={args.noise_scale}")
     else:
         raise ValueError(f"Unknown training_type: {args.training_type}")
 
@@ -504,50 +345,6 @@ def main():
         "alpha":     args.alpha,
         "num_steps": args.num_steps,
         "beta":      args.beta,
-        # loc_ent keys (ignored by adv_pgd / trades branches)
-        "gamma":         args.loc_ent_gamma,
-        "num_particles": args.num_particles,
-        "langevin_steps":args.langevin_steps,
-        "step_size":     args.loc_ent_step_size,
-        "noise_scale":   args.noise_scale,
-        "ema_alpha":     args.ema_alpha,
-        "burn_in":       args.burn_in,
-        "init_dist":     args.init_dist,
-    }
-
-    # Local-Entropy generator (constructed once so state persists across epochs)
-    loc_ent_gen = None
-    if args.training_type == "loc_ent":
-        loc_ent_gen = LocalEntropyGenerator(
-            epsilon=args.epsilon,
-            norm=args.norm,
-            gamma=args.loc_ent_gamma,
-            num_particles=args.num_particles,
-            langevin_steps=args.langevin_steps,
-            step_size=args.loc_ent_step_size,
-            noise_scale=args.noise_scale,
-            ema_alpha=args.ema_alpha,
-            burn_in=args.burn_in,
-            init_dist=args.init_dist,
-        )
-
-    # PR config
-    sigma_list = build_sigma_list(epsilon=args.epsilon, K=args.K, mode_type=args.sigma_dist_type)
-    pr_config = {
-        "type": args.training_type,
-        "norm": args.norm,
-        "epsilon": args.epsilon,
-
-        "beta_mix": args.beta_mix,
-        "kappa": args.kappa,
-       
-        "K": args.K,
-        "sigma_list": sigma_list,
-        "fisher_damping": args.fisher_damping,
-        "tau": args.tau,
-       
-        "noise_scale": args.noise_scale,
-        "num_samples": args.num_samples,
     }
 
     # Output path
@@ -557,18 +354,15 @@ def main():
     logger.info(f"[save] csv       -> {os.path.join(args.save_dir, f'{args.arch.lower()}_{args.dataset.lower()}_training_info.csv')}")
 
     # Train
+    ep = 0  # Initialize epoch counter
     for ep in range(1, args.epochs + 1):
         start = time.time()
         if args.training_type == "standard":
             train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, device, criterion,
                                                     epoch=ep, total_epochs=args.epochs)
-        elif args.training_type in ["adv_pgd", "trades", "loc_ent"]:
+        elif args.training_type in ["adv_pgd", "trades"]:
             train_loss, train_acc = train_one_epoch_adv(model, train_loader, optimizer, device, criterion, adv_config,
-                                                        loc_ent_gen=loc_ent_gen,
                                                         epoch=ep, total_epochs=args.epochs)
-        elif args.training_type == "pr":
-            train_loss, train_acc, avg_stats = train_one_epoch_pr(model, train_loader, optimizer, device, criterion, pr_config,
-                                                                  epoch=ep, total_epochs=args.epochs)
         else:
             raise ValueError(f"Unknown training_type: {args.training_type}")
 
@@ -579,20 +373,15 @@ def main():
             elapsed = time.time() - start
 
             model.eval()
-            ## Evaluation on Test set (clean and PR attack) ##
-            pr_kwargs = {k: v for k, v in pr_config.items() if k != "type"}
+            ## Evaluation on Test set (clean accuracy) ##
             evaluator = Evaluator(model, test_loader, criterion, device)
             clean = evaluator.evaluate_standard()
             val_acc, val_loss = clean["acc"], clean["loss"]
-            pr_result = evaluator.evaluate_pr(pr_generator=pr_generator, **pr_kwargs)
-            eval_rob_acc = pr_result["pr"]
 
             ## Evaluation on Train subset (same size as test set) ##
             evaluator.update_loader(subtrain_loader)
             clean_T = evaluator.evaluate_standard()
             val_acc_T, val_loss_T = clean_T["acc"], clean_T["loss"]
-            pr_result_T = evaluator.evaluate_pr(pr_generator=pr_generator, **pr_kwargs)
-            eval_rob_acc_T = pr_result_T["pr"]
 
             current_lr = scheduler.get_last_lr()[0]
             log_msg = (
@@ -603,10 +392,8 @@ def main():
                 f"train_acc={train_acc*100:.2f}% "
                 f"| trainS_loss={val_loss_T:.4f} "
                 f"trainS_acc={val_acc_T*100:.2f}% "
-                f"trainS_rob_acc={eval_rob_acc_T*100:.2f}% "
                 f"| val_loss={val_loss:.4f} "
-                f"val_acc={val_acc*100:.2f}% "
-                f"rob_acc={eval_rob_acc*100:.2f}%"
+                f"val_acc={val_acc*100:.2f}%"
             )
             logger.info(log_msg)
 
@@ -621,13 +408,9 @@ def main():
                 'train_acc':       train_acc,
                 'trainS_loss':    val_loss_T,
                 'trainS_acc':     val_acc_T,
-                'trainS_rob_acc': eval_rob_acc_T,
                 'val_loss':       val_loss,
                 'val_acc':        val_acc,
-                'rob_acc':        eval_rob_acc,
             }
-            if args.training_type == "pr":
-                epoch_info.update(avg_stats)
             training_history.append(epoch_info)
 
             # overwrite CSV with the full history so far
@@ -647,10 +430,8 @@ def main():
         "training_type": args.training_type,
         "model_state": model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
     }
-    if args.training_type in ["adv_pgd", "trades", "loc_ent"]:
+    if args.training_type in ["adv_pgd", "trades"]:
         ckpt["adv_config"] = adv_config
-    elif args.training_type == "pr":
-        ckpt["pr_config"] = pr_config
 
     torch.save(ckpt, out_path)
     logger.info(f"  -> saved last checkpoint to {out_path}")
