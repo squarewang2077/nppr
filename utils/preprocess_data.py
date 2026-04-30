@@ -96,47 +96,6 @@ def get_dataset(name: str, root: str, train: bool, img_size: int, augment: bool 
     return ds, num_classes
 
 
-def get_NonAug_dataset(name: str, root: str, train: bool, img_size: int):
-    """Build dataset with NO augmentation (only ToTensor).
-
-    All transforms (train and test):
-        ToTensor (no resize, uses original image size)
-
-    This is useful for training methods that require clean, non-augmented data
-    (e.g., local entropy PR training).
-
-    Note: img_size parameter is kept for API compatibility but not used.
-    """
-    name = name.lower()
-
-    # Only ToTensor transform, no augmentation or resize at all
-    tf = T.Compose([
-        T.ToTensor(),           # outputs [0, 1]; normalization is handled inside the model
-    ])
-
-    if name == "cifar10":
-        ds = dsets.CIFAR10(root=root, train=train, download=True, transform=tf)
-        num_classes = 10
-    elif name == "cifar100":
-        ds = dsets.CIFAR100(root=root, train=train, download=True, transform=tf)
-        num_classes = 100
-    elif name == "tinyimagenet":
-        split = "train" if train else "val"
-        base = os.path.join(root, "tiny-imagenet-200", split)
-        if not os.path.isdir(base):
-            raise FileNotFoundError(
-                f"TinyImageNet folder not found at {base}.\n"
-                "Download from http://cs231n.stanford.edu/tiny-imagenet-200.zip "
-                "and extract to <root>/tiny-imagenet-200/"
-            )
-        ds = dsets.ImageFolder(base, transform=tf)
-        num_classes = 200
-    else:
-        raise ValueError(f"Unknown dataset {name}")
-
-    return ds, num_classes
-
-
 # ------------------------------------------------------------------
 #                       Indexed Dataset Utilities
 # ------------------------------------------------------------------

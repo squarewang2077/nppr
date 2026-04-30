@@ -423,19 +423,14 @@ def langevin_update_local_entropy(
 
         # Explicit localization gradient
         gamma_expand = gamma_curr.view(B, 1, 1, 1, 1)
-        grad_local = gamma_expand * (particles_req - anchor) / dim
+        grad_local = gamma_expand * (particles_req - anchor)
 
         grad = grad_energy + grad_local
 
         # Langevin update
         noise = torch.randn_like(particles_req)
 
-        particles_next = (
-            particles_req
-            - cfg.step_size * grad
-            + noise_std * noise
-        )
-
+        particles_next = particles_req - cfg.step_size * grad + noise_std * noise
         particles = state.project(particles_next.detach(), x)
 
     state.particles = particles.detach()
@@ -457,7 +452,7 @@ def local_entropy_trades_loss(
         state: ParticleState,
         criterion,
         beta_outer: float = 6.0,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     TRADES-style outer loss using state.x_adv.
 
@@ -465,6 +460,12 @@ def local_entropy_trades_loss(
         + beta_outer * E_delta KL(
               p_clean(. | x) || p_adv(. | x + delta)
           )
+
+    Returns:
+        loss:        scalar tensor, the combined outer loss.
+        logits_adv:  (B*N, num_classes) logits on adversarial particles.
+                     Returned so the training loop can reuse them for
+                     accuracy without an extra forward pass.
     """
     if state.x_adv is None:
         raise RuntimeError("state.x_adv is None. Run particle update first.")
@@ -492,4 +493,4 @@ def local_entropy_trades_loss(
 
     loss = loss_natural + beta_outer * loss_robust
 
-    return loss
+    return loss, logits_adv.detach()
