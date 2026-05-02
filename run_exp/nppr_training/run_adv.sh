@@ -32,7 +32,7 @@ LR=0.01
 WEIGHT_DECAY=5e-4
 SEED=42
 
-ARCHS=("resnet18")
+ARCHS=("resnet50")
 # ARCHS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
 # DATASETS=("cifar10")
 DATASETS=("cifar10" "cifar100" "tinyimagenet")

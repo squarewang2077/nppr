@@ -46,7 +46,7 @@ NUM_PARTICLES_LIST=(1)
 INIT_METHOD="uniform"        # zero | gaussian | uniform
 
 # Langevin dynamics
-LANGEVIN_STEPS_LIST=(1 3 15)
+LANGEVIN_STEPS_LIST=(10)
 STEP_SIZE=1e-2
 LANGEVIN_BETA=100
 NOISE_SCALE=1.0
@@ -57,14 +57,14 @@ PSI_ALPHA=10.0
 
 # Threshold strategy
 THRESHOLD_MODE="fixed"       # fixed | adaptive
-T0=-0.05
+T0_LIST=(-0.05)
 T_FLOOR=0.0
 
 # Scope strategy
 SCOPE_MODE="fixed"           # fixed | dynamic
 
 # GAMMA sweep
-GAMMAS=(0.05)
+GAMMAS=(-5000 -1000 -50 -1 -0.05 -0.0001 0 0.0001)
 
 # Outer TRADES-style loss
 BETA_OUTER=12.0
@@ -81,6 +81,7 @@ echo "  Training Type: ${TRAINING_TYPE}"
 echo "  GAMMA sweep: ${GAMMAS[*]}"
 echo "  NUM_PARTICLES sweep: ${NUM_PARTICLES_LIST[*]}"
 echo "  LANGEVIN_STEPS sweep: ${LANGEVIN_STEPS_LIST[*]}"
+echo "  T0 sweep: ${T0_LIST[*]}"
 echo "======================================================"
 echo ""
 
@@ -92,9 +93,10 @@ for DATASET in "${DATASETS[@]}"; do
         for NUM_PARTICLES in "${NUM_PARTICLES_LIST[@]}"; do
         for LANGEVIN_STEPS in "${LANGEVIN_STEPS_LIST[@]}"; do
         for GAMMA in "${GAMMAS[@]}"; do
-            RUN_NAME="loc_ent_eps${LANGEVIN_STEPS}_L${LANGEVIN_BETA}_G${GAMMA}_N${NUM_PARTICLES}"
+        for T0 in "${T0_LIST[@]}"; do
+            RUN_NAME="loc_ent_eps${LANGEVIN_STEPS}_L${LANGEVIN_BETA}_G${GAMMA}_N${NUM_PARTICLES}_T${T0}"
             echo "======================================================"
-            echo "  arch=${ARCH}  dataset=${DATASET}  gamma=${GAMMA}  num_particles=${NUM_PARTICLES}  langevin_steps=${LANGEVIN_STEPS}"
+            echo "  arch=${ARCH}  dataset=${DATASET}  gamma=${GAMMA}  num_particles=${NUM_PARTICLES}  langevin_steps=${LANGEVIN_STEPS}  t0=${T0}"
             echo "  run=${RUN_NAME}"
             echo "  save_dir=${SAVE_DIR}"
             echo "======================================================"
@@ -146,6 +148,7 @@ for DATASET in "${DATASETS[@]}"; do
             mv "${SRC_BASE}_training_info.csv"    "${DST_BASE}_training_info.csv"
 
             echo "  -> renamed outputs to ${RUN_NAME}.{pth,log,csv}"
+        done
         done
         done
         done
