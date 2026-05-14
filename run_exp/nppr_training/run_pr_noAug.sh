@@ -64,7 +64,7 @@ T_FLOOR=0.0
 SCOPE_MODE="fixed"           # fixed | dynamic
 
 # GAMMA sweep
-GAMMAS=(-5000 -1000 -50 -1 -0.05 -0.0001 0 0.0001)
+GAMMAS=(-1 -0.05 0)
 
 # Outer TRADES-style loss
 BETA_OUTER=12.0

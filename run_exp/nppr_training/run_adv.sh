@@ -27,22 +27,22 @@ export CUDA_VISIBLE_DEVICES=${GPU_ID}
 
 DATA_ROOT="./dataset"
 EPOCHS=100
-BATCH_SIZE=512
+BATCH_SIZE=128
 LR=0.01
 WEIGHT_DECAY=5e-4
 SEED=42
 
-ARCHS=("resnet50")
+ARCHS=("resnet18")
 # ARCHS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
-# DATASETS=("cifar10")
-DATASETS=("cifar10" "cifar100" "tinyimagenet")
+DATASETS=("cifar10")
+# DATASETS=("cifar10" "cifar100" "tinyimagenet")
 TRAINING_TYPE="adv_pgd"       # standard | adv_pgd | trades
 
 # Adversarial attack budget (used by adv_pgd and trades)
 NORM="linf"
 EPSILON=0.03137              # 8/255
 ALPHA=0.00784                # 2/255
-NUM_STEPS=10
+NUM_STEPS=3
 
 # TRADES-only KL regularization weight
 BETA=12.0

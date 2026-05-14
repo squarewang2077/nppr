@@ -33,12 +33,12 @@ export CUDA_VISIBLE_DEVICES=${GPU_ID}
 
 DATA_ROOT="./dataset"
 EPOCHS=100
-BATCH_SIZE=512
+BATCH_SIZE=256
 LR=0.01
 WEIGHT_DECAY=5e-4
 SEED=42
 
-ARCHS=("resnet18")
+ARCHS=("resnet50" "wide_resnet50_2")
 # ARCHS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
 # DATASETS=("cifar10")
 DATASETS=("cifar10" "cifar100" "tinyimagenet")
