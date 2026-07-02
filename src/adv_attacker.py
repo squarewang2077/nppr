@@ -54,7 +54,8 @@ def _linf_step(x_adv, x, grad, alpha, epsilon):
 #                          PGD attack
 # ------------------------------------------------------------------
 
-def pgd_attack(model, x, y, epsilon, alpha, num_steps, norm="linf", random_start=True):
+def pgd_attack(model, x, y, epsilon, alpha, num_steps, norm="linf",
+               random_start=True, return_path=False):
     """
     PGD attack (inner loop) for generating adversarial examples.
 
@@ -67,9 +68,13 @@ def pgd_attack(model, x, y, epsilon, alpha, num_steps, norm="linf", random_start
         num_steps: Number of PGD steps
         norm: "linf" or "l2"
         random_start: Whether to start from a random perturbation
+        return_path: If True, also return the perturbation trajectory
+                     Delta = [delta_1, ..., delta_T] with delta_t = x_adv_t - x.
 
     Returns:
         x_adv: Adversarial examples (B, C, H, W)
+        path (only if return_path): tensor (num_steps, B, C, H, W) of per-step
+              perturbations delta_t, recorded after each PGD step.
     """
     norm = norm.lower()
     x_adv = x.clone().detach()
@@ -83,6 +88,7 @@ def pgd_attack(model, x, y, epsilon, alpha, num_steps, norm="linf", random_start
         else:
             raise ValueError(f"Unsupported norm: {norm}")
 
+    path = [] if return_path else None
     for _ in range(num_steps):
         x_adv.requires_grad_(True)
         loss = F.cross_entropy(model(x_adv), y)
@@ -93,6 +99,11 @@ def pgd_attack(model, x, y, epsilon, alpha, num_steps, norm="linf", random_start
         else:  # l2
             x_adv = _l2_step(x_adv, x, grad, alpha, epsilon)
 
+        if return_path:
+            path.append((x_adv - x).detach())
+
+    if return_path:
+        return x_adv, torch.stack(path, dim=0)
     return x_adv
 
 
@@ -100,7 +111,8 @@ def pgd_attack(model, x, y, epsilon, alpha, num_steps, norm="linf", random_start
 #                         PGD-AT loss
 # ------------------------------------------------------------------
 
-def pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion, norm="linf"):
+def pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion, norm="linf",
+                random_start=True):
     """
     PGD-AT loss (outer loop): Train on adversarial examples.
 
@@ -113,13 +125,15 @@ def pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion, norm="linf"):
         epsilon, alpha, num_steps: PGD parameters
         criterion: Loss function (e.g., CrossEntropyLoss)
         norm: "linf" or "l2"
+        random_start: Whether the inner PGD attack starts from a random perturbation
 
     Returns:
         loss: Adversarial loss
         x_adv: Generated adversarial examples
     """
     model.eval()
-    x_adv = pgd_attack(model, x, y, epsilon, alpha, num_steps, norm=norm)
+    x_adv = pgd_attack(model, x, y, epsilon, alpha, num_steps, norm=norm,
+                       random_start=random_start)
 
     model.train()
     logits_adv = model(x_adv)

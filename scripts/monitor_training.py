@@ -57,6 +57,24 @@
 #   --epsilon       perturbation budget                 (default: 8/255)
 #   --alpha         PGD step size                       (default: 2/255)
 #   --num_steps     number of PGD steps                 (default: 10)
+#   --random_start  random init for every PGD attack    (default: off)
+#
+#   PGD path tracking:
+#     The inner PGD attack produces a perturbation trajectory
+#     Delta_e(x) = [delta_1, ..., delta_T] (delta_t = x_adv_t - x, length = num_steps).
+#     With --track_path, this path is recorded every epoch for a fixed set of
+#     --path_track_n images and compared against the previous epoch's path
+#     Delta_{e-1}(x). Three scalar "drift" metrics (averaged over the tracked
+#     images) are logged and written to the CSV. The L2 terms are normalized by
+#     (epsilon * sqrt(d)), d = C*H*W, i.e. per-element RMS deviation in units of
+#     epsilon (in [0, 2] for an L-inf attack):
+#       path_drift_step     - (1/T) sum_t ||delta_t^e - delta_t^{e-1}||_2 / (eps*sqrt(d))
+#       path_drift_endpoint - ||delta_T^e - delta_T^{e-1}||_2 / (eps*sqrt(d))
+#       path_cos            - mean per-step cosine sim between the two paths
+#     Random start defaults OFF so the drift reflects the model update, not
+#     init noise.
+#   --track_path    enable PGD path tracking / drift      (default: off)
+#   --path_track_n  number of images to track            (default: 16)
 #
 # Examples:
 #   # PGD adversarial training on CIFAR-10 with ResNet-18 (no augmentation)
@@ -81,6 +99,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Subset
 import torch.backends.cudnn as cudnn
@@ -172,17 +191,19 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
     total_samples = 0
     pbar = tqdm(loader, desc=f"Adv Train [{epoch}/{total_epochs}]" if epoch else "Adv Training", leave=False)
 
-    norm      = adv_config["norm"]
-    epsilon   = adv_config["epsilon"]
-    alpha     = adv_config["alpha"]
-    num_steps = adv_config["num_steps"]
+    norm         = adv_config["norm"]
+    epsilon      = adv_config["epsilon"]
+    alpha        = adv_config["alpha"]
+    num_steps    = adv_config["num_steps"]
+    random_start = adv_config["random_start"]
 
     for x, y in pbar:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
 
         # Compute adversarial loss (inner PGD loop + outer loss)
-        loss, x_adv = pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion, norm=norm)
+        loss, x_adv = pgd_at_loss(model, x, y, epsilon, alpha, num_steps, criterion,
+                                  norm=norm, random_start=random_start)
 
         loss.backward()
         optimizer.step()
@@ -253,6 +274,56 @@ def evaluate_per_epoch(model, loader, device, criterion, pgd_cfg=None, eval_name
 
 
 # ------------------------------------------------------------------
+#           PGD attack-path tracking and cross-epoch drift
+# ------------------------------------------------------------------
+
+def compute_pgd_path(model, x, y, adv_config):
+    """Record the PGD perturbation trajectory for a fixed batch of images.
+
+    Returns the path Delta(x) = [delta_1, ..., delta_T] as a tensor of shape
+    (num_steps, B, C, H, W), where delta_t = x_adv_t - x after PGD step t.
+    """
+    was_training = model.training
+    model.eval()
+    _, path = pgd_attack(
+        model, x, y,
+        adv_config["epsilon"], adv_config["alpha"], adv_config["num_steps"],
+        norm=adv_config["norm"], random_start=adv_config["random_start"],
+        return_path=True,
+    )
+    if was_training:
+        model.train()
+    return path.detach()
+
+
+def path_drift(path_e, path_prev, epsilon):
+    """Distance between two aligned PGD paths for the same images.
+
+    Both paths have shape (T, B, C, H, W) and share the same length T, so the
+    trajectories are compared step-by-step. The per-step L2 distance is
+    normalized by (epsilon * sqrt(d)), d = C*H*W, i.e. it is the per-element
+    RMS deviation between the two perturbations measured in units of epsilon;
+    for an L-inf attack this lies in [0, 2]. Returns scalar drift metrics
+    averaged over steps and images:
+      path_drift_step     - (1/T) sum_t mean_B ||delta_t^e - delta_t^{e-1}||_2 / (eps*sqrt(d))
+      path_drift_endpoint - mean_B ||delta_T^e - delta_T^{e-1}||_2 / (eps*sqrt(d))
+      path_cos            - mean over (t, B) cosine sim between delta_t^e, delta_t^{e-1}
+    """
+    diff = path_e - path_prev                         # (T, B, C, H, W)
+    d = diff[0, 0].numel()                            # C*H*W
+    denom = epsilon * (d ** 0.5)
+    step_l2 = diff.flatten(2).norm(dim=2)             # (T, B) per-step per-image L2
+    cos = F.cosine_similarity(
+        path_e.flatten(2), path_prev.flatten(2), dim=2, eps=1e-12
+    )                                                 # (T, B)
+    return {
+        "path_drift_step":     (step_l2.mean() / denom).item(),
+        "path_drift_endpoint": (step_l2[-1].mean() / denom).item(),
+        "path_cos":            cos.mean().item(),
+    }
+
+
+# ------------------------------------------------------------------
 #                           Main Function
 # ------------------------------------------------------------------
 
@@ -295,6 +366,16 @@ def main():
                     help="PGD step size")
     ap.add_argument("--num_steps", type=int, default=10,
                     help="Number of PGD steps")
+    ap.add_argument("--random_start", action="store_true",
+                    help="Random init for every PGD attack (training, eval, path "
+                         "tracking). Default OFF so path drift reflects the model update.")
+
+    # PGD attack-path tracking / cross-epoch drift (opt-in)
+    ap.add_argument("--track_path", action="store_true",
+                    help="Record the PGD perturbation trajectory each epoch for a fixed "
+                         "set of images and log its drift vs the previous epoch.")
+    ap.add_argument("--path_track_n", type=int, default=16,
+                    help="Number of fixed images to track when --track_path is set.")
 
     # Per-epoch PGD evaluation (opt-in; clean accuracy is always reported)
     ap.add_argument("--eval_pgd", action="store_true",
@@ -386,11 +467,25 @@ def main():
 
     # PGD adversarial config
     adv_config = {
-        "norm":      args.norm,
-        "epsilon":   args.epsilon,
-        "alpha":     args.alpha,
-        "num_steps": args.num_steps,
+        "norm":         args.norm,
+        "epsilon":      args.epsilon,
+        "alpha":        args.alpha,
+        "num_steps":    args.num_steps,
+        "random_start": args.random_start,
     }
+
+    # Fixed batch for PGD path tracking (built once; same images every epoch so
+    # Delta_e(x) and Delta_{e-1}(x) are directly comparable).
+    track_x = track_y = None
+    prev_path = None      # previous epoch's path Delta_{e-1}
+    last_drift = None     # most recent drift dict, stashed for the CSV
+    if args.track_path:
+        n_track = min(args.path_track_n, len(indices))
+        track_samples = [train_set_NONaug[int(i)] for i in indices[:n_track]]
+        track_x = torch.stack([s[0] for s in track_samples]).to(device)
+        track_y = torch.tensor([int(s[1]) for s in track_samples], device=device)
+        logger.info(f"[path] tracking PGD attack path on {n_track} fixed images "
+                    f"(random_start={args.random_start}, num_steps={args.num_steps})")
 
     # Output path
     out_path = os.path.join(args.save_dir, f"{name_tag}.pth")
@@ -414,6 +509,20 @@ def main():
 
         scheduler.step()
 
+        # ----- PGD attack-path drift vs the previous epoch (every epoch) -----
+        if args.track_path:
+            cur_path = compute_pgd_path(model, track_x, track_y, adv_config)
+            if prev_path is not None:
+                last_drift = path_drift(cur_path, prev_path, adv_config["epsilon"])
+                logger.info(
+                    f"[path] ep={ep} step_l2={last_drift['path_drift_step']:.4f} "
+                    f"endpoint={last_drift['path_drift_endpoint']:.4f} "
+                    f"cos={last_drift['path_cos']:.4f}"
+                )
+            else:
+                logger.info(f"[path] ep={ep} baseline path recorded (no drift yet)")
+            prev_path = cur_path
+
         # Evaluation and checkpointing
         if ep % 5 == 0 or ep == args.epochs:
             elapsed = time.time() - start
@@ -422,10 +531,11 @@ def main():
             pgd_cfg = None
             if args.eval_pgd:
                 pgd_cfg = {
-                    "epsilon":   args.epsilon,
-                    "alpha":     args.epsilon / 4.0,
-                    "num_steps": args.pgd_steps,
-                    "norm":      args.pgd_norm,
+                    "epsilon":      args.epsilon,
+                    "alpha":        args.epsilon / 4.0,
+                    "num_steps":    args.pgd_steps,
+                    "norm":         args.pgd_norm,
+                    "random_start": args.random_start,
                 }
 
             ## Evaluation on Test set ##
@@ -480,6 +590,10 @@ def main():
                 'val_loss':      test_metrics['clean_loss'],
                 'val_acc':       test_metrics['clean_acc'],
                 'val_pgd':       test_metrics['pgd_acc'],
+                # PGD attack-path drift vs previous epoch (None if disabled / epoch 1)
+                'path_drift_step':     last_drift['path_drift_step'] if last_drift else None,
+                'path_drift_endpoint': last_drift['path_drift_endpoint'] if last_drift else None,
+                'path_cos':            last_drift['path_cos'] if last_drift else None,
             }
             training_history.append(epoch_info)
 
