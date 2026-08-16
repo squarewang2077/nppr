@@ -4,7 +4,7 @@
 dataset/*
 ckp/*
 plots/*
-results/*
+# results/*
 tmp/*
 tests/standard_training/*
 tests/adv_training/*

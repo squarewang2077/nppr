@@ -1,0 +1,13 @@
+arch,dataset,training_type,ckp_path,norm,epsilon,alpha,num_samples,variance,test_pr,test_num_draws,test_time
+resnet18,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet18_cifar10.pth,linf,0.0627,0.00784,32,0.1,0.765809375,320000,5.797052941052243
+resnet18,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet18_cifar100.pth,linf,0.0627,0.00784,32,0.1,0.459015625,320000,5.8389858161099255
+resnet18,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet18_tinyimagenet.pth,linf,0.0627,0.00784,32,0.1,0.44114375,320000,9.600160222966224
+resnet50,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet50_cifar10.pth,linf,0.0627,0.00784,32,0.1,0.77111875,320000,15.161023076856509
+resnet50,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet50_cifar100.pth,linf,0.0627,0.00784,32,0.1,0.4752125,320000,15.30648783990182
+resnet50,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet50_tinyimagenet.pth,linf,0.0627,0.00784,32,0.1,0.56666875,320000,26.56929107196629
+vgg16,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_cifar10.pth,linf,0.0627,0.00784,32,0.1,0.713665625,320000,16.83176538394764
+vgg16,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_cifar100.pth,linf,0.0627,0.00784,32,0.1,0.424275,320000,17.14152881503105
+vgg16,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_tinyimagenet.pth,linf,0.0627,0.00784,32,0.1,0.533715625,320000,44.98673743195832
+wide_resnet50_2,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_cifar10.pth,linf,0.0627,0.00784,32,0.1,0.7969625,320000,20.231155526125804
+wide_resnet50_2,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_cifar100.pth,linf,0.0627,0.00784,32,0.1,0.50569375,320000,20.540284676942974
+wide_resnet50_2,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_tinyimagenet.pth,linf,0.0627,0.00784,32,0.1,0.6087875,320000,42.28948535909876

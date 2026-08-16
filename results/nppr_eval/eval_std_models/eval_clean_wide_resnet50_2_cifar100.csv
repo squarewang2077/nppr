@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,test_clean_acc,test_clean_loss,test_clean_time
+wide_resnet50_2,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_cifar100.pth,0.7202,1.1537562896728515,1.2676846490358002

@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,norm,epsilon,pgd_steps,test_pgd_acc,test_pgd_loss,test_pgd_time,test_cw_acc,test_cw_loss,test_cw_time,test_aa_acc,test_aa_loss,test_aa_time
+wide_resnet50_2,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_tinyimagenet.pth,linf,0.03137,10,0.0035,18.781069744873047,30.280131498002447,0.0008,6.445808972167969,29.663099062046967,0.0,24.805584573364257,244.7274126050179

@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,gmm_train_eps,gmm_train_norm,gmm_eval_eps,gmm_eval_norm,num_samples,test_pr_gmm,test_pr_gmm_time,test_pr_gmm_D_proxy,test_pr_gmm_pi_entropy
+vgg16,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_cifar100.pth,0.06274509803921569,linf,0.12549,linf,32,0.164615625,16.02496722806245,6.4821241897583,0.0

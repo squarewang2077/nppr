@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,norm,epsilon,pgd_steps,test_pgd_acc,test_pgd_loss,test_pgd_time,test_cw_acc,test_cw_loss,test_cw_time,test_aa_acc,test_aa_loss,test_aa_time
+vgg16,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_cifar100.pth,linf,0.03137,10,0.0031,24.413936126708986,11.403739713015966,0.0004,5.75450917892456,11.165237298991997,0.0,28.320344201660156,96.22750964900479

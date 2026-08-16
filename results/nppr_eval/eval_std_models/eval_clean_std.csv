@@ -1,0 +1,13 @@
+arch,dataset,training_type,ckp_path,test_clean_acc,test_clean_loss,test_clean_time
+resnet18,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet18_cifar10.pth,0.8772,0.3621646089076996,0.6340061039663851
+resnet18,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet18_cifar100.pth,0.6338,1.3323209324836731,0.6595594279933721
+resnet18,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet18_tinyimagenet.pth,0.5699,1.7824832397460937,1.1800952189951204
+resnet50,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet50_cifar10.pth,0.9075,0.2893484565258026,0.9080637639854104
+resnet50,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet50_cifar100.pth,0.7057,1.144662094116211,0.8851718700025231
+resnet50,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet50_tinyimagenet.pth,0.7039,1.3913192827224732,1.434897996019572
+vgg16,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_cifar10.pth,0.9228,0.2386278588533401,0.9470150579581968
+vgg16,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_cifar100.pth,0.7102,1.0652669045448304,0.9220647990005092
+vgg16,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_tinyimagenet.pth,0.6695,1.5021156997680665,1.905377032002434
+wide_resnet50_2,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_cifar10.pth,0.9113,0.2857173673629761,1.31968167796731
+wide_resnet50_2,cifar100,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_cifar100.pth,0.7202,1.1537562896728517,1.2676846490358002
+wide_resnet50_2,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/wrn/wide_resnet50_2_tinyimagenet.pth,0.7374,1.247239030456543,2.0345922100241296

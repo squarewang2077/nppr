@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,gmm_train_eps,gmm_train_norm,gmm_eval_eps,gmm_eval_norm,num_samples,test_pr_gmm,test_pr_gmm_time,test_pr_gmm_D_proxy,test_pr_gmm_pi_entropy
+vgg16,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/vgg/vgg16_tinyimagenet.pth,0.06274509803921569,linf,0.03137,linf,32,0.55333125,43.70721497701015,3.0279598007202146,0.0

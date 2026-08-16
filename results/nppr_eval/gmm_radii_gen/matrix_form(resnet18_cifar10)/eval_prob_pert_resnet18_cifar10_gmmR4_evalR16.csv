@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,gmm_train_eps,gmm_train_norm,gmm_eval_eps,gmm_eval_norm,num_samples,test_pr_gmm,test_pr_gmm_time,test_pr_gmm_D_proxy,test_pr_gmm_pi_entropy
+resnet18,cifar10,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet18_cifar10.pth,0.01568627450980392,linf,0.06275,linf,32,0.69853125,4.23752293700818,3.1911005432128907,0.0

@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,norm,epsilon,alpha,num_samples,variance,test_pr,test_num_draws,test_time
+wide_resnet50_2,tinyimagenet,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/tinyimagenet/wide_resnet50_2_tinyimagenet_adv_pgd.pth,linf,0.03137,0.00784,32,0.01,0.25650625,320000,42.464533146936446

@@ -1,0 +1,10 @@
+arch,dataset,training_type,ckp_path,test_clean_acc,test_clean_loss,test_clean_time
+resnet18,cifar10,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar10/resnet18_cifar10.pth,0.7242,0.8879981117248535,0.6135558289824985
+resnet18,cifar100,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar100/resnet18_cifar100_adv_pgd.pth,0.4939,2.063967914199829,0.6635770179564133
+resnet18,tinyimagenet,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/tinyimagenet/resnet18_tinyimagenet_adv_pgd.pth,0.2134,3.8045575416564943,1.123294232995249
+resnet50,cifar10,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar10/resnet50_cifar10.pth,0.7529,0.7998126002311706,0.950122093956452
+resnet50,cifar100,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar100/resnet50_cifar100_adv_pgd.pth,0.5214,1.9100685134887696,0.9731615800410508
+resnet50,tinyimagenet,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/tinyimagenet/resnet50_tinyimagenet_adv_pgd.pth,0.2794,3.3531098834991453,1.453209920960944
+wide_resnet50_2,cifar10,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar10/wide_resnet50_2_cifar10.pth,0.7883,0.7007265374660492,1.3198102180031128
+wide_resnet50_2,cifar100,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar100/wide_resnet50_2_cifar100_adv_pgd.pth,0.211,3.466373342514038,1.3068826720118525
+wide_resnet50_2,tinyimagenet,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/tinyimagenet/wide_resnet50_2_tinyimagenet_adv_pgd.pth,0.3337,3.0339659061431883,2.0779336590203457

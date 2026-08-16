@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,norm,epsilon,alpha,num_samples,variance,test_pr,test_num_draws,test_time
+resnet50,cifar100,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar100/resnet50_cifar100_adv_pgd.pth,linf,0.03137,0.00784,32,0.01,0.366453125,320000,14.383431818103418

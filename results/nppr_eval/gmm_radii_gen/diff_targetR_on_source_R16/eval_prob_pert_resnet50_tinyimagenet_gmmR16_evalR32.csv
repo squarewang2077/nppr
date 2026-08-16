@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,gmm_train_eps,gmm_train_norm,gmm_eval_eps,gmm_eval_norm,num_samples,test_pr_gmm,test_pr_gmm_time,test_pr_gmm_D_proxy,test_pr_gmm_pi_entropy
+resnet50,tinyimagenet,standard,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/standard/resnet/resnet50_tinyimagenet.pth,0.06274509803921569,linf,0.12549,linf,32,0.223478125,23.35575163096655,12.547538211059571,0.0

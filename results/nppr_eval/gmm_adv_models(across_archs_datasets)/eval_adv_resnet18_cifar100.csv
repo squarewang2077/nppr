@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,norm,epsilon,pgd_steps,test_pgd_acc,test_pgd_loss,test_pgd_time,test_cw_acc,test_cw_loss,test_cw_time,test_aa_acc,test_aa_loss,test_aa_time
+resnet18,cifar100,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/cifar100/resnet18_cifar100_adv_pgd.pth,linf,0.03137,10,0.2167,3.389120949554443,3.0481224760296755,0.197,2.7257077865600587,2.7809963520267047,0.1711,2.561323561477661,1290.2897849869914

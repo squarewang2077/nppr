@@ -1,0 +1,20 @@
+2026-04-27 12:47:33  [config] ckpt=./ckp/nppr_eval/standard/resnet/resnet18_cifar10.pth
+2026-04-27 12:47:33  [config] dataset=cifar10, arch=resnet18, img_size=32
+2026-04-27 12:47:33  [config] epsilon=0.0314, norm=linf, num_particles=8, langevin_steps=10
+2026-04-27 12:47:33  [config] step_size=0.01, langevin_beta=100.0, noise_scale=1.0
+2026-04-27 12:47:33  [config] psi_type=softplus, psi_alpha=10.0, threshold_mode=fixed, t0=-0.05, t_floor=0.0
+2026-04-27 12:47:33  [config] scope_mode=fixed, gamma=5000.0, init_method=uniform
+2026-04-27 12:47:35  [load] checkpoint loaded from ./ckp/nppr_eval/standard/resnet/resnet18_cifar10.pth
+2026-04-27 12:47:35  [load] ckpt.arch = resnet18
+2026-04-27 12:47:35  [load] ckpt.dataset = cifar10
+2026-04-27 12:47:35  [load] ckpt.epoch = 50
+2026-04-27 12:47:35  [load] ckpt.training_type = standard
+2026-04-27 12:48:13  ============================================================
+2026-04-27 12:48:13  [result] clean_acc       = 87.72%   (8772/10000)
+2026-04-27 12:48:13  [result] worst_acc       = 86.22%   (fraction of samples where ALL 8 particles still correct)
+2026-04-27 12:48:13  [result] mean_pr         = 89.02%   (mean fraction of correct particles per sample)
+2026-04-27 12:48:13  [result] attack_success  = 13.78%   (fraction of samples fooled by at least one particle)
+2026-04-27 12:48:13  [result] per_pair_acc    = 89.02%   (raw count over all sample-particle pairs)
+2026-04-27 12:48:13  ============================================================
+2026-04-27 12:48:13  [save] summary -> ./results/nppr_training/locent_attack/cifar10/resnet18/resnet18_cifar10_locent_attack_eps10_L100_G5000_summary.csv
+2026-04-27 12:48:13  [save] log     -> ./results/nppr_training/locent_attack/cifar10/resnet18/resnet18_cifar10_locent_attack_eps10_L100_G5000.log

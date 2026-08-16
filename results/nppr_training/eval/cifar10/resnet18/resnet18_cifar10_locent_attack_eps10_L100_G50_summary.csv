@@ -1,0 +1,2 @@
+ckpt,arch,dataset,img_size,norm,epsilon,num_particles,langevin_steps,step_size,langevin_beta,noise_scale,gamma,psi_type,psi_alpha,threshold_mode,t0,scope_mode,init_method,n_total,clean_acc,worst_acc,mean_pr,attack_success
+./ckp/nppr_eval/standard/resnet/resnet18_cifar10.pth,resnet18,cifar10,32,linf,0.03137,8,10,0.01,100.0,1.0,50.0,softplus,10.0,fixed,-0.05,fixed,uniform,10000,0.8772,0.3427,0.5988,0.6573

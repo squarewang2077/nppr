@@ -1,0 +1,2 @@
+arch,dataset,training_type,ckp_path,test_clean_acc,test_clean_loss,test_clean_time
+resnet18,tinyimagenet,adv_pgd,/home/wang3_z@WMGDS.WMG.WARWICK.AC.UK/nppr/ckp/adv_pgd/tinyimagenet/resnet18_tinyimagenet_adv_pgd.pth,0.2134,3.8045575416564943,1.1232942329952493
