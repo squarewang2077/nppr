@@ -67,9 +67,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #
 #   from utils.evaluator import Evaluator
-#   from utils.adv_attacker import pgd_attack
-#   from utils.pr_generator import pr_generator
-#   from config_fitting import build_sigma_list
+#   from src.adv_attacker import pgd_attack
+#   from src.langevin4pr import pr_generator
+#   from configs.train_clf_cfg import build_sigma_list
 #
 #   evaluator = Evaluator(model, test_loader, criterion=nn.CrossEntropyLoss(),
 #                         device=device)
@@ -108,6 +108,8 @@ from typing import Any, Dict, Optional
 
 import torch
 from tqdm import tqdm
+
+from utils.utils import pr_random_generator, pr_gmm_generator
 
 
 # =========================================
@@ -182,9 +184,11 @@ def pr_transform(model, x, y, pr_generator, **kwargs):
 class Evaluator:
     """
     Unified evaluator supporting:
-      - Standard clean accuracy / loss           → evaluate_standard()
-      - Pointwise adversarial accuracy / loss    → evaluate_adversarial()
-      - Distributional PR evaluation             → evaluate_pr()
+      - Standard clean accuracy / loss              → evaluate_standard()
+      - Pointwise adversarial accuracy / loss       → evaluate_adversarial()
+      - Distributional PR evaluation (Langevin)     → evaluate_pr()
+      - Distributional PR evaluation (random noise) → evaluate_pr_random()
+      - Distributional PR evaluation (trained GMM)  → evaluate_pr_gmm()
 
     Usage::
 
@@ -256,6 +260,58 @@ class Evaluator:
             transform=pr_transform,
             eval_name=eval_name,
             pr_generator=pr_generator,
+            **kwargs,
+        )
+
+    def evaluate_pr_gmm(self, gmm, eval_name="pr_gmm", **kwargs):
+        """
+        Distributional evaluation using a trained GMM4PR model.
+
+        The perturbation budget (epsilon, norm) is taken from the GMM's own
+        training configuration — no separate epsilon argument is required.
+
+        Args:
+            gmm       : trained GMM4PR instance returned by load_gmm_model().
+                        Its internal feature extractor may differ from the
+                        classifier stored in self.model — that is intentional.
+            eval_name : label shown on the tqdm bar.
+            **kwargs  : forwarded to pr_gmm_generator.
+                        Key parameters:
+                          num_samples – N draws per input.
+                          epsilon     – override the GMM's training radius.
+                          norm        – override the GMM's training norm
+                                        ("linf" or "l2").
+        """
+        return self.evaluate(
+            transform=pr_transform,
+            eval_name=eval_name,
+            pr_generator=pr_gmm_generator,
+            gmm=gmm,
+            **kwargs,
+        )
+
+    def evaluate_pr_random(self, eval_name="pr_random", **kwargs):
+        """
+        Distributional evaluation using i.i.d. random noise perturbations.
+
+        Perturbations are sampled from a chosen distribution (Gaussian, Uniform,
+        or Laplace), projected onto the epsilon-ball, and evaluated with the same
+        (B, N, C, H, W) pipeline as evaluate_pr — making results directly
+        comparable.
+
+        Args:
+            eval_name : label shown on the tqdm bar.
+            **kwargs  : forwarded to pr_random_generator.
+                        Key parameters:
+                          epsilon    – perturbation budget
+                          norm       – "linf" or "l2"
+                          num_samples – N draws per input
+                          noise_dist  – "gaussian" | "uniform" | "laplace"
+        """
+        return self.evaluate(
+            transform=pr_transform,
+            eval_name=eval_name,
+            pr_generator=pr_random_generator,
             **kwargs,
         )
 

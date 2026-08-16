@@ -1,2 +1,0 @@
-arch,dataset,training_type,ckp_path,norm,epsilon,pgd_steps,num_samples,test_clean_acc,test_clean_loss,test_pgd_acc,test_pgd_loss,test_pr,test_pr_D_mu,test_pr_D_sig,test_pr_D_proxy,test_pr_pi_entropy,test_pr_pi_max
-resnet18,cifar10,standard,./ckp/tmp/cifar10/resnet18_cifar10.pth,linf,0.03137,20,32,0.8638,0.40404293217659,0.0005,12.990507632446288,0.70849375,0.11637849400043487,0.00032402847660705446,0.11670252208709717,0.6830335752487182,0.6102911680221558
