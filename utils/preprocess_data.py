@@ -18,6 +18,7 @@ import torchvision.datasets as dsets
 CIFAR10_MEAN, CIFAR10_STD   = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
 CIFAR100_MEAN, CIFAR100_STD = (0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762)
 TINY_MEAN, TINY_STD         = (0.4802, 0.4481, 0.3975), (0.2302, 0.2265, 0.2262)
+SVHN_MEAN, SVHN_STD         = (0.4377, 0.4438, 0.4728), (0.1980, 0.2010, 0.1970)
 MNIST_MEAN, MNIST_STD       = (0.1307,),                 (0.3081,)
 
 # ------------------------------------------------------------------
@@ -34,6 +35,8 @@ def get_norm_stats(dataset: str):
         return CIFAR100_MEAN, CIFAR100_STD
     if dataset == "tinyimagenet":
         return TINY_MEAN, TINY_STD
+    if dataset == "svhn":
+        return SVHN_MEAN, SVHN_STD
     raise ValueError(f"Unknown dataset {dataset}")
 
 
@@ -59,14 +62,20 @@ def get_dataset(name: str, root: str, train: bool, img_size: int, augment: bool 
 
     if train and augment:
         padding = max(4, img_size // 8)   # 4 for CIFAR-32, 8 for TinyImageNet-64
-        tf = T.Compose([
+        ops = [
             T.Resize(img_size),
             T.RandomCrop(img_size, padding=padding, padding_mode="reflect"),
-            T.RandomHorizontalFlip(),
+        ]
+        # Digits are not mirror-symmetric: flipping SVHN turns a 2 into
+        # something that is not a 2, so the label becomes wrong.
+        if name != "svhn":
+            ops.append(T.RandomHorizontalFlip())
+        ops += [
             T.RandAugment(num_ops=2, magnitude=9),  # AutoAugment-style policy
             T.ToTensor(),           # outputs [0, 1]; normalization is handled inside the model
             T.RandomErasing(p=0.25, scale=(0.02, 0.2)),  # occlusion robustness
-        ])
+        ]
+        tf = T.Compose(ops)
     else:
         tf = T.Compose([
             T.Resize(img_size),
@@ -79,6 +88,11 @@ def get_dataset(name: str, root: str, train: bool, img_size: int, augment: bool 
     elif name == "cifar100":
         ds = dsets.CIFAR100(root=root, train=train, download=True, transform=tf)
         num_classes = 100
+    elif name == "svhn":
+        # SVHN ships as split files rather than a train/test flag.
+        ds = dsets.SVHN(root=root, split="train" if train else "test",
+                        download=True, transform=tf)
+        num_classes = 10
     elif name == "tinyimagenet":
         split = "train" if train else "val"
         base = os.path.join(root, "tiny-imagenet-200", split)

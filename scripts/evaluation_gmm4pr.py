@@ -103,16 +103,16 @@ def parse_args():
 
     # ---- Classifier checkpoint / arch ----
     ap.add_argument("--arch", choices=[
-        "resnet18", "resnet50", "wide_resnet50_2",
+        "resnet18", "resnet34", "resnet50", "wide_resnet50_2",
         "vgg16", "densenet121", "mobilenet_v3_large", "efficientnet_b0",
-        "vit_b_16",
+        "vit_tiny", "vit_small", "convit_tiny", "convit_small",
     ], default="resnet18",
                     help="Fallback when the checkpoint lacks an `arch` field.")
     ap.add_argument("--ckp_path", required=True, type=str,
                     help="Path to the classifier .pth checkpoint to evaluate.")
 
     # ---- Dataset ----
-    ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet"],
+    ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet", "svhn"],
                     default=None,
                     help="Dataset to evaluate on (default: read from ckpt).")
     ap.add_argument("--data_root", type=str, default="./dataset")

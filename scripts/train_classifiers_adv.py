@@ -46,7 +46,8 @@
 #   --dataset       {cifar10, cifar100, tinyimagenet}  (default: cifar10)
 #   --arch          {resnet18, resnet50, wide_resnet50_2, vgg16,
 #                    densenet121, mobilenet_v3_large,
-#                    efficientnet_b0, vit_b_16}         (default: resnet18)
+#                    efficientnet_b0, vit_tiny, vit_small,
+#                    convit_tiny, convit_small}        (default: resnet18)
 #   --training_type {standard, adv_pgd, trades}        (default: adv_pgd)
 #   --epochs        number of training epochs           (default: 50)
 #   --batch_size    mini-batch size                     (default: 1024)
@@ -410,12 +411,12 @@ def main():
     ap = argparse.ArgumentParser()
 
     # Dataset & model
-    ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet"], default="cifar10")
+    ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet", "svhn"], default="cifar10")
     ap.add_argument("--data_root", type=str, default="./dataset")
     ap.add_argument("--arch", choices=[
-        "resnet18", "resnet50", "wide_resnet50_2",
+        "resnet18", "resnet34", "resnet50", "wide_resnet50_2",
         "vgg16", "densenet121", "mobilenet_v3_large", "efficientnet_b0",
-        "vit_b_16"
+        "vit_tiny", "vit_small", "convit_tiny", "convit_small",
     ], default="resnet18")
     ap.add_argument("--pretrained", action="store_true",
                     help="Load ImageNet pretrained weights (recommended: use --lr 0.01)")

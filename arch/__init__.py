@@ -4,25 +4,32 @@
 #   torch >= 2.0
 #   torchvision >= 0.15
 
+import inspect
+
 import torch
 import torch.nn as nn
 
-from .resnets import resnet18, resnet50, wide_resnet50_2
+from .resnets import resnet18, resnet34, resnet50, wide_resnet50_2
 from .densenet import densenet121
 from .vgg import vgg16
 from .mobilenet import mobilenet_v3_large
 from .efficientnet import efficientnet_b0
-from .vit import vit_b_16
+from .vit import vit_tiny, vit_small, convit_tiny, convit_small
 
 MODEL_REGISTRY = {
     "resnet18": resnet18,
+    "resnet34": resnet34,
     "resnet50": resnet50,
     "wide_resnet50_2": wide_resnet50_2,
     "densenet121": densenet121,
     "vgg16": vgg16,
     "mobilenet_v3_large": mobilenet_v3_large,
     "efficientnet_b0": efficientnet_b0,
-    "vit_b_16": vit_b_16,
+    # Transformers: from-scratch, sized for 32/64px inputs.
+    "vit_tiny": vit_tiny,
+    "vit_small": vit_small,
+    "convit_tiny": convit_tiny,
+    "convit_small": convit_small,
 }
 
 
@@ -52,12 +59,18 @@ def build_model(arch: str, num_classes: int, dataset: str, pretrained: bool = Fa
     """
     # Deferred import to break the circular dependency:
     # model_zoo -> utils.__init__ -> utils.utils -> fit_classifiers -> model_zoo
-    from utils.preprocess_data import get_norm_stats
+    from utils.preprocess_data import get_norm_stats, get_img_size
 
     arch = arch.lower()
     if arch not in MODEL_REGISTRY:
         raise ValueError(f"Unknown architecture: {arch}. Available: {list(MODEL_REGISTRY.keys())}")
-    backbone = MODEL_REGISTRY[arch](num_classes=num_classes, pretrained=pretrained)
+    builder = MODEL_REGISTRY[arch]
+    kwargs = {}
+    # Small-input ViTs size their patch grid from the resolution they will see;
+    # CNNs are fully convolutional and ignore it.
+    if "img_size" in inspect.signature(builder).parameters:
+        kwargs["img_size"] = get_img_size(dataset)
+    backbone = builder(num_classes=num_classes, pretrained=pretrained, **kwargs)
     mean, std = get_norm_stats(dataset)
     return NormalizedModel(backbone, mean, std)
 
@@ -86,13 +99,9 @@ def build_feat_extractor(arch: str, num_classes: int, dataset: str,
     if backbone is None:
         backbone = build_model(arch=arch, num_classes=num_classes, dataset=dataset).backbone
 
-    if arch == "resnet18":
-        return nn.Sequential(*list(backbone.children())[:-1], nn.Flatten())
-
-    elif arch == "resnet50":
-        return nn.Sequential(*list(backbone.children())[:-1], nn.Flatten())
-
-    elif arch == "wide_resnet50_2":
+    if arch.startswith("resnet") or arch.startswith("wide_resnet"):
+        # Module order is conv1, bn1, relu, maxpool, layer1..4, avgpool, fc —
+        # dropping the trailing fc leaves exactly the feature trunk.
         return nn.Sequential(*list(backbone.children())[:-1], nn.Flatten())
 
     elif arch == "vgg16":
@@ -120,22 +129,17 @@ def build_feat_extractor(arch: str, num_classes: int, dataset: str,
             nn.Flatten(),
         )
 
-    elif arch == "vit_b_16":
-        class ViTFeat(nn.Module):
-            def __init__(self, vit):
+    elif hasattr(backbone, "forward_features"):
+        # ViT / DeiT / ConViT all expose forward_features -> (B, embed_dim).
+        class TransformerFeat(nn.Module):
+            def __init__(self, model):
                 super().__init__()
-                self.vit = vit
+                self.model = model
 
             def forward(self, x):
-                x = self.vit._process_input(x)
-                n = x.shape[0]
-                cls_tok = self.vit.class_token.expand(n, -1, -1)
-                x = torch.cat([cls_tok, x], dim=1)
-                x = self.vit.encoder(x)
-                x = x[:, 0]
-                return self.vit.ln(x) if hasattr(self.vit, "ln") else x
+                return self.model.forward_features(x)
 
-        return ViTFeat(backbone)
+        return TransformerFeat(backbone)
 
     else:
         raise ValueError(f"Unsupported arch: {arch}")

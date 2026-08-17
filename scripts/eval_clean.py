@@ -42,15 +42,15 @@ def main():
 
     # ---- Model / checkpoint ----
     ap.add_argument("--arch", choices=[
-        "resnet18", "resnet50", "wide_resnet50_2",
+        "resnet18", "resnet34", "resnet50", "wide_resnet50_2",
         "vgg16", "densenet121", "mobilenet_v3_large", "efficientnet_b0",
-        "vit_b_16",
+        "vit_tiny", "vit_small", "convit_tiny", "convit_small",
         ], default="resnet18")
     ap.add_argument("--ckp_path", type=str,
                     default="ckp/tmp/cifar10/resnet18_cifar10.pth")
 
     # ---- Dataset ----
-    ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet"],
+    ap.add_argument("--dataset", choices=["cifar10", "cifar100", "tinyimagenet", "svhn"],
                     default="cifar10")
     ap.add_argument("--data_root", type=str, default="./dataset")
     ap.add_argument("--img_size", type=int, default=None)
