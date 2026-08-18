@@ -58,7 +58,7 @@ def build_model(arch: str, num_classes: int, dataset: str, pretrained: bool = Fa
     dataset-specific normalization internally.
     """
     # Deferred import to break the circular dependency:
-    # model_zoo -> utils.__init__ -> utils.utils -> fit_classifiers -> model_zoo
+    # arch -> utils.__init__ -> utils.utils -> train_classifiers -> arch
     from utils.preprocess_data import get_norm_stats, get_img_size
 
     arch = arch.lower()

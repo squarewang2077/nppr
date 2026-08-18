@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_locent_attack.sh
+# run_level_attack.sh
 # Local-entropy attack evaluation of a single checkpoint over a GAMMA sweep.
 #
 # For each GAMMA value, runs scripts/eval_prob_perturbations(LocEnt).py and
@@ -33,32 +33,25 @@ SEED=42
 # Attack: perturbation budget
 NORM="linf"
 EPSILON=0.03137              # 8/255
-NUM_PARTICLES=8
-INIT_METHOD="uniform"        # zero | gaussian | uniform
+NUM_STARTS=8
 
 # Attack: Langevin dynamics (typically stronger than training defaults)
-LANGEVIN_STEPS=10
+NUM_STEPS=50
 STEP_SIZE=1e-2
-LANGEVIN_BETA=100
-NOISE_SCALE=1.0
 
 # Energy function
-PSI_TYPE="softplus"          # softplus | hinge
 PSI_ALPHA=10.0
 
-# Threshold strategy
-THRESHOLD_MODE="fixed"       # fixed | adaptive
-T0=-0.05
-T_FLOOR=0.0
+# Level-set solver
+T_LEVEL=0.0
+TOL=0.05
 
-# Scope strategy
-SCOPE_MODE="fixed"           # fixed | dynamic
-
-# GAMMA sweep
-GAMMAS=(50 100 200 500 1000 5000)
+# ANCHOR_LAMBDA sweep — L2 pull toward each random start.
+# Keep these small: large values stop perturbations reaching the level set.
+ANCHOR_LAMBDAS=(0.0 0.01 0.02 0.05 0.1)
 
 # Save root for attack summaries / logs
-SAVE_DIR="./results/nppr_training/locent_attack/${DATASET}/${ARCH}"
+SAVE_DIR="./results/nppr_training/level_attack/${DATASET}/${ARCH}"
 mkdir -p "${SAVE_DIR}"
 
 # ---------------------------------------------------------------------------
@@ -68,15 +61,15 @@ echo "======================================================"
 echo "  Using GPU:       ${GPU_ID}"
 echo "  Checkpoint:      ${CKPT}"
 echo "  Dataset / arch:  ${DATASET} / ${ARCH}"
-echo "  GAMMA sweep:     ${GAMMAS[*]}"
+echo "  ANCHOR_LAMBDA sweep: ${ANCHOR_LAMBDAS[*]}"
 echo "  Output dir:      ${SAVE_DIR}"
 echo "======================================================"
 echo ""
 
-for GAMMA in "${GAMMAS[@]}"; do
-    TAG="eps${LANGEVIN_STEPS}_L${LANGEVIN_BETA}_G${GAMMA}"
+for ANCHOR_LAMBDA in "${ANCHOR_LAMBDAS[@]}"; do
+    TAG="t${T_LEVEL}_S${NUM_STEPS}_A${ANCHOR_LAMBDA}"
     echo "======================================================"
-    echo "  gamma=${GAMMA}   tag=${TAG}"
+    echo "  anchor_lambda=${ANCHOR_LAMBDA}   tag=${TAG}"
     echo "======================================================"
 
     python "scripts/eval_prob_perturbations(LocEnt).py" \
@@ -88,23 +81,17 @@ for GAMMA in "${GAMMAS[@]}"; do
         --seed           "${SEED}"           \
         --norm           "${NORM}"           \
         --epsilon        "${EPSILON}"        \
-        --num_particles  "${NUM_PARTICLES}"  \
-        --init_method    "${INIT_METHOD}"    \
-        --langevin_steps "${LANGEVIN_STEPS}" \
-        --step_size      "${STEP_SIZE}"      \
-        --langevin_beta  "${LANGEVIN_BETA}"  \
-        --noise_scale    "${NOISE_SCALE}"    \
-        --psi_type       "${PSI_TYPE}"       \
-        --psi_alpha      "${PSI_ALPHA}"      \
-        --threshold_mode "${THRESHOLD_MODE}" \
-        --t0             "${T0}"             \
-        --t_floor        "${T_FLOOR}"        \
-        --scope_mode     "${SCOPE_MODE}"     \
-        --gamma          "${GAMMA}"          \
+        --num_starts     "${NUM_STARTS}"      \
+        --num_steps      "${NUM_STEPS}"       \
+        --step_size      "${STEP_SIZE}"       \
+        --t              "${T_LEVEL}"         \
+        --anchor_lambda  "${ANCHOR_LAMBDA}"   \
+        --psi_alpha      "${PSI_ALPHA}"       \
+        --tol            "${TOL}"             \
         --save_dir       "${SAVE_DIR}"       \
         --tag            "${TAG}"
 done
 
 echo ""
-echo "All local-entropy attack runs completed."
+echo "All level-set attack runs completed."
 echo "Results in: ${SAVE_DIR}"

@@ -109,7 +109,7 @@ import pandas as pd
 
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
-from src.adv_attacker import pgd_at_loss, pgd_attack
+from src.adv_loss import pgd_at_loss, pgd_attack
 
 
 def setup_logger(log_path: str) -> logging.Logger:

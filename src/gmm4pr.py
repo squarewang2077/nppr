@@ -228,25 +228,27 @@ class GMM4PR(nn.Module):
         else:
             raise ValueError(f"cond_mode must be x/y/xy/none, got {cond_mode}")           
             
-        # Count parameters
+        # Count parameters.  Depending on cond_mode, `pi` and `mu` are either
+        # nn.Module heads (conditional) or bare nn.Parameter tensors
+        # (unconditional), so count them through a helper that accepts both.
         total_params = sum(p.numel() for p in self.parameters())
-        if self.cond_mode in ["x", "xy"]:
-            trunk_params = sum(p.numel() for p in self.shared_trunk.parameters())
-            pi_params = sum(p.numel() for p in self.pi.parameters())
-            mu_params = sum(p.numel() for p in self.mu.parameters())
-
-        elif self.cond_mode == "y":
-            trunk_params = 0
-            pi_params = sum(p.numel() for p in self.pi.parameters())
-            mu_params = self.mu.numel()
-        
-        else: # unconditional
-            trunk_params = 0
-            pi_params = self.pi.numel()
-            mu_params = self.mu.numel()
+        trunk_params = self._count_params(self.shared_trunk) if self.shared_trunk is not None else 0
+        pi_params = self._count_params(self.pi)
+        mu_params = self._count_params(self.mu)
 
         cov_params = total_params - pi_params - mu_params
         print(f"[Params] Shared trunk: {trunk_params:,} | pi: {pi_params:,} | mu: {mu_params:,}, | cov: {cov_params:,} | Total: {total_params:,}")
+
+    @staticmethod
+    def _count_params(m) -> int:
+        """Number of parameters in either a sub-module or a bare Parameter.
+
+        `pi` / `mu` switch between the two depending on cond_mode, so the
+        isinstance check keeps this correct for every mode.
+        """
+        if isinstance(m, nn.Parameter):
+            return m.numel()
+        return sum(p.numel() for p in m.parameters())
 
     def _init_cov_params(self, cov_type, cov_rank):
         """Initialize unconditional covariance parameters."""
@@ -738,9 +740,14 @@ class GMM4PR(nn.Module):
                 y.unsqueeze(0).expand(num_samples, -1).flatten()
             )
 
-        # Regularization
+        # Regularization.  Seed the sum with a zero *tensor*: bare sum() starts
+        # from the int 0, so an empty reg_terms would yield an int and break the
+        # .detach() below.
         reg_terms = self.compute_regularization(cache)
-        total_reg = sum(self.reg_coeffs.get(k, 0.0) * v for k, v in reg_terms.items())
+        total_reg = sum(
+            (self.reg_coeffs.get(k, 0.0) * v for k, v in reg_terms.items()),
+            start=torch.zeros((), device=logits.device, dtype=main_loss.dtype),
+        )
 
         total_loss = main_loss + total_reg
 
@@ -985,16 +992,15 @@ class GMM4PR(nn.Module):
                 "Pass out_shape=(C, H, W) explicitly, e.g., out_shape=(3, 32, 32)"
             )
         
-        # Decide whether to chunk
-        use_chunking = (chunk_size is not None and num_samples > chunk_size)
-        
-        if not use_chunking:
+        # Decide whether to chunk.  Test chunk_size directly rather than via a
+        # helper flag so that chunk_size is narrowed to int below.
+        if chunk_size is None or num_samples <= chunk_size:
             # Simple path: sample all at once
             eps = dist.sample((num_samples,))
             u = self._decode_latent(eps, out_shape=out_shape)
             delta = self._project_to_budget(u)
             return {"eps": eps, "u": u, "delta": delta}
-        
+
         # Chunked path: sample in batches
         eps_list, u_list, delta_list = [], [], []
         num_chunks = (num_samples + chunk_size - 1) // chunk_size # standard ceiling division trick

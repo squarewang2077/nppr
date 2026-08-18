@@ -39,7 +39,7 @@ if [ ! -f "${CLF_CKPT}" ]; then
     exit 1
 fi
 
-python scripts/train_mixture.py \
+python scripts/nppr_eval/train_mixture.py \
     --arch "${ARCH}" \
     --dataset "${DATASET}" \
     --clf_ckpt "${CLF_CKPT}" \

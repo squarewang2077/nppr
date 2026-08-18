@@ -24,7 +24,7 @@ import pandas as pd
 
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
-from src.adv_attacker import pgd_attack
+from src.adv_loss import pgd_attack
 from utils.evaluator import Evaluator, DistributionEvalBatch
 from pathlib import Path
 

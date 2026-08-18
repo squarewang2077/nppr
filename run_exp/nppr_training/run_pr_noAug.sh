@@ -5,7 +5,7 @@
 # CIFAR-10, CIFAR-100, and TinyImageNet.
 #
 # Sweeps over a list of GAMMA values; each run's outputs are renamed to
-#   loc_ent_eps<LANGEVIN_STEPS>_L<LANGEVIN_BETA>_G<GAMMA>.{pth,log,csv}
+#   level_t<T_LEVEL>_S<NUM_STEPS>_A<ANCHOR_LAMBDA>_N<NUM_STARTS>.{pth,log,csv}
 # so that the gamma sweep does not clobber prior runs.
 
 set -euo pipefail
@@ -35,39 +35,32 @@ ARCHS=("resnet18")
 # ARCHS=("resnet18" "resnet50" "wide_resnet50_2" "vgg16")
 DATASETS=("cifar10")
 # DATASETS=("cifar10" "cifar100" "tinyimagenet")
-TRAINING_TYPE="loc_entropy"  # standard | loc_entropy
+TRAINING_TYPE="level"  # standard | level
 
 # Perturbation budget
 NORM="linf"
 EPSILON=0.03137              # 8/255
 
 # Particle settings
-NUM_PARTICLES_LIST=(1)
-INIT_METHOD="uniform"        # zero | gaussian | uniform
+NUM_STARTS_LIST=(8)
 
 # Langevin dynamics
-LANGEVIN_STEPS_LIST=(10)
+NUM_STEPS_LIST=50
 STEP_SIZE=1e-2
-LANGEVIN_BETA=100
-NOISE_SCALE=1.0
 
 # Energy function
-PSI_TYPE="softplus"          # softplus | hinge
+TOL=0.05                     # |m - t| <= TOL counts as valid
 PSI_ALPHA=10.0
 
 # Threshold strategy
-THRESHOLD_MODE="fixed"       # fixed | adaptive
-T0_LIST=(-0.05)
-T_FLOOR=0.0
+T_LEVEL_LIST=(0.0)           # target margin levels to sweep
 
 # Scope strategy
-SCOPE_MODE="fixed"           # fixed | dynamic
 
 # GAMMA sweep
-GAMMAS=(-1 -0.05 0)
+ANCHOR_LAMBDAS=(0.02)        # L2 pull toward each random start
 
 # Outer TRADES-style loss
-BETA_OUTER=12.0
 
 # Save root
 SAVE_ROOT="./ckp/nppr_training/pr_training"
@@ -78,9 +71,9 @@ SAVE_ROOT="./ckp/nppr_training/pr_training"
 echo "======================================================"
 echo "  Using GPU: ${GPU_ID}"
 echo "  Training Type: ${TRAINING_TYPE}"
-echo "  GAMMA sweep: ${GAMMAS[*]}"
-echo "  NUM_PARTICLES sweep: ${NUM_PARTICLES_LIST[*]}"
-echo "  LANGEVIN_STEPS sweep: ${LANGEVIN_STEPS_LIST[*]}"
+echo "  ANCHOR_LAMBDA sweep: ${ANCHOR_LAMBDAS[*]}"
+echo "  NUM_STARTS sweep: ${NUM_STARTS_LIST[*]}"
+echo "  NUM_STEPS sweep: ${NUM_STEPS_LIST[*]}"
 echo "  T0 sweep: ${T0_LIST[*]}"
 echo "======================================================"
 echo ""
@@ -90,18 +83,18 @@ for DATASET in "${DATASETS[@]}"; do
         SAVE_DIR="${SAVE_ROOT}/${DATASET}/${ARCH}/${TRAINING_TYPE}"
         mkdir -p "${SAVE_DIR}"
 
-        for NUM_PARTICLES in "${NUM_PARTICLES_LIST[@]}"; do
-        for LANGEVIN_STEPS in "${LANGEVIN_STEPS_LIST[@]}"; do
-        for GAMMA in "${GAMMAS[@]}"; do
-        for T0 in "${T0_LIST[@]}"; do
-            RUN_NAME="loc_ent_eps${LANGEVIN_STEPS}_L${LANGEVIN_BETA}_G${GAMMA}_N${NUM_PARTICLES}_T${T0}"
+        for NUM_STARTS in "${NUM_STARTS_LIST[@]}"; do
+        for NUM_STEPS in "${NUM_STEPS_LIST[@]}"; do
+        for ANCHOR_LAMBDA in "${ANCHOR_LAMBDAS[@]}"; do
+        for T_LEVEL in "${T_LEVEL_LIST[@]}"; do
+            RUN_NAME="level_t${T_LEVEL}_S${NUM_STEPS}_A${ANCHOR_LAMBDA}_N${NUM_STARTS}_T${T_LEVEL}"
             echo "======================================================"
-            echo "  arch=${ARCH}  dataset=${DATASET}  gamma=${GAMMA}  num_particles=${NUM_PARTICLES}  langevin_steps=${LANGEVIN_STEPS}  t0=${T0}"
+            echo "  arch=${ARCH}  dataset=${DATASET}  t=${T_LEVEL}  num_starts=${NUM_STARTS}  num_steps=${NUM_STEPS}  t0=${T_LEVEL}"
             echo "  run=${RUN_NAME}"
             echo "  save_dir=${SAVE_DIR}"
             echo "======================================================"
 
-            python scripts/train_classifiers_pr.py \
+            python scripts/pr_training/pos_geo_training.py \
                 --dataset        "${DATASET}"        \
                 --data_root      "${DATA_ROOT}"      \
                 --arch           "${ARCH}"           \
@@ -113,25 +106,23 @@ for DATASET in "${DATASETS[@]}"; do
                 --seed           "${SEED}"           \
                 --norm           "${NORM}"           \
                 --epsilon        "${EPSILON}"        \
-                --num_particles  "${NUM_PARTICLES}"  \
-                --init_method    "${INIT_METHOD}"    \
-                --langevin_steps "${LANGEVIN_STEPS}" \
-                --step_size      "${STEP_SIZE}"      \
-                --langevin_beta  "${LANGEVIN_BETA}"  \
-                --noise_scale    "${NOISE_SCALE}"    \
-                --psi_type       "${PSI_TYPE}"       \
-                --psi_alpha      "${PSI_ALPHA}"      \
-                --threshold_mode "${THRESHOLD_MODE}" \
-                --t0             "${T0}"             \
-                --t_floor        "${T_FLOOR}"        \
-                --scope_mode     "${SCOPE_MODE}"     \
-                --gamma          "${GAMMA}"          \
-                --beta_outer     "${BETA_OUTER}"     \
+                --num_starts     "${NUM_STARTS}"      \
+
+                --num_steps      "${NUM_STEPS}"       \
+
+                --step_size      "${STEP_SIZE}"       \
+
+                --t              "${T_LEVEL}"         \
+
+                --anchor_lambda  "${ANCHOR_LAMBDA}"   \
+
+                --psi_alpha      "${PSI_ALPHA}"       \
+
+                --tol            "${TOL}"             \
                 --eval_pgd --pgd_steps 10 --pgd_norm linf \
-                --eval_locent --locent_n 8 --locent_steps 10 --locent_norm linf \
+                --eval_level --level_n 8 --level_steps 50 --level_norm linf \
                 --eval_random --random_n 8 --random_norm linf \
                 --random_dist gaussian uniform laplace \
-                --eval_corruptions --corruption_severities 1 \
                 --save_dir       "${SAVE_DIR}"
 
             # Rename outputs so each gamma run keeps its own files.

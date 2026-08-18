@@ -31,8 +31,7 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 #   - Probabilistic robustness (eval_prob_perturbation.py)
 #     GMM feature extractor + classifier: both adversarially trained
 #
-# Note: Clean accuracy, adversarial robustness, and corruption
-#       robustness are evaluated in eval_adv_models.sh
+# Note: Clean accuracy and adversarial robustness
 #
 # Results: ./results/eval_gmm4adv/eval_prob_perturbation_{model}_{dataset}.csv
 # ------------------------------------------------------------------

@@ -92,11 +92,12 @@ import pandas as pd
 
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
-from src.adv_attacker import pgd_at_loss, trades_loss
+from src.adv_loss import pgd_at_loss, trades_loss
+from utils.epoch_eval import evaluate_per_epoch, evaluate_aa
 
 def setup_logger(log_path: str) -> logging.Logger:
     """Return a logger that writes to both stdout and *log_path*."""
-    logger = logging.getLogger("fit_classifiers")
+    logger = logging.getLogger("train_classifiers")
     logger.setLevel(logging.INFO)
     logger.propagate = False  # prevent duplicate output if root logger has handlers
     fmt = logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -229,6 +230,10 @@ def main():
     ], default="resnet18")
     ap.add_argument("--pretrained", action="store_true",
                     help="Load ImageNet pretrained weights (recommended: use --lr 0.01)")
+    ap.add_argument("--augment", action="store_true",
+                    help="Enable training-set data augmentation (RandomCrop / Flip / "
+                         "RandAugment / RandomErasing). When set, output filenames "
+                         "are tagged with '_Aug'.")
 
     # General Training Settings
     ap.add_argument("--epochs", type=int, default=100)
@@ -254,6 +259,58 @@ def main():
                     help="TRADES KL regularization weight")
 
     # Misc
+    # ============================================================
+    # Per-epoch evaluation knobs
+    #
+    # Each evaluation is opt-in. Clean accuracy is always reported. We expose
+    # only the high-level "what level" knobs (steps, num samples, severities,
+    # version) and optionally the norm; finer attack hyperparameters are
+    # derived from --epsilon and standard ratios.
+    # ============================================================
+
+    # PGD
+    ap.add_argument("--eval_pgd", action="store_true",
+                    help="Run PGD adversarial eval at every eval cycle.")
+    ap.add_argument("--pgd_steps", type=int, default=10,
+                    help="Number of PGD steps when --eval_pgd is set.")
+    ap.add_argument("--pgd_norm", choices=["linf", "l2"], default="linf",
+                    help="Norm constraint for PGD eval.")
+
+    # Local-Entropy mean-PR (sensible defaults; n + steps + norm exposed,
+    # other Level internals pinned inside level_generator).
+    ap.add_argument("--eval_level", action="store_true",
+                    help="Run Local-Entropy mean-PR eval at every eval cycle.")
+    ap.add_argument("--level_n", type=int, default=8,
+                    help="Number of level-set perturbations at eval.")
+    ap.add_argument("--level_steps", type=int, default=50,
+                    help="Solver steps for the level-set eval attack.")
+    ap.add_argument("--level_t", type=float, default=0.0,
+                    help="Target margin level for the level-set eval attack.")
+    ap.add_argument("--level_norm", choices=["linf", "l2"], default="linf",
+                    help="Norm constraint for the level-set attack.")
+
+    # Random-noise PR baseline. --random_dist accepts multiple distributions;
+    # one PR score is reported per distribution.
+    ap.add_argument("--eval_random", action="store_true",
+                    help="Run random-noise PR eval at every eval cycle.")
+    ap.add_argument("--random_n", type=int, default=8,
+                    help="Number of random draws per sample.")
+    ap.add_argument("--random_norm", choices=["linf", "l2"], default="linf",
+                    help="Norm for random-PR projection.")
+    ap.add_argument("--random_dist", nargs="+",
+                    choices=["gaussian", "uniform", "laplace"],
+                    default=["gaussian"],
+                    help="One or more sampling distributions for random-PR.")
+
+    # AutoAttack (final epoch only)
+    ap.add_argument("--eval_aa", action="store_true",
+                    help="Run AutoAttack at the final epoch (slow).")
+    ap.add_argument("--aa_version", choices=["standard", "plus", "rand"],
+                    default="rand",
+                    help="AutoAttack version.")
+    ap.add_argument("--aa_norm", choices=["linf", "l2"], default="linf",
+                    help="Norm for AutoAttack.")
+
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--save_dir", type=str, default="./ckp/adv_training",
@@ -270,15 +327,15 @@ def main():
 
     # Set up output directory and logger early so config lines are captured
     os.makedirs(args.save_dir, exist_ok=True)
-    log_path = os.path.join(
-        args.save_dir,
-        f"{args.arch.lower()}_{args.dataset.lower()}_{args.training_type}.log"
-    )
+    aug_suffix = "_Aug" if args.augment else ""
+    name_tag = f"{args.arch.lower()}_{args.dataset.lower()}_{args.training_type}{aug_suffix}"
+    log_path = os.path.join(args.save_dir, f"{name_tag}.log")
     logger = setup_logger(log_path)
 
     # Log config
     logger.info(f"[config] dataset={args.dataset}, arch={args.arch}, pretrained={args.pretrained}")
-    logger.info(f"[config] img_size={img_size}")
+    aug_state = "ENABLED (RandomCrop+Flip+RandAugment+RandomErasing)" if args.augment else "DISABLED (no-aug train set)"
+    logger.info(f"[config] img_size={img_size}, augmentation={aug_state}")
     if args.training_type == "standard":
         logger.info(f"[config] training_type={args.training_type}, no adversarial perturbations")
     elif args.training_type == "adv_pgd":
@@ -294,7 +351,7 @@ def main():
     training_history = []
 
     # Build datasets/loaders
-    train_set, num_classes = get_dataset(args.dataset, args.data_root, True, img_size, augment=True)
+    train_set, num_classes = get_dataset(args.dataset, args.data_root, True, img_size, augment=args.augment)
     test_set, _ = get_dataset(args.dataset, args.data_root, False, img_size, augment=False)
 
     train_loader = torch.utils.data.DataLoader(
@@ -349,10 +406,10 @@ def main():
     }
 
     # Output path
-    out_path = os.path.join(args.save_dir, f"{args.arch.lower()}_{args.dataset.lower()}_{args.training_type}.pth")
+    out_path = os.path.join(args.save_dir, f"{name_tag}.pth")
     logger.info(f"[save] checkpoint -> {out_path}")
     logger.info(f"[save] log       -> {log_path}")
-    logger.info(f"[save] csv       -> {os.path.join(args.save_dir, f'{args.arch.lower()}_{args.dataset.lower()}_training_info.csv')}")
+    logger.info(f"[save] csv       -> {os.path.join(args.save_dir, f'{name_tag}_training_info.csv')}")
 
     # Train
     ep = 0  # Initialize epoch counter
@@ -374,48 +431,142 @@ def main():
             elapsed = time.time() - start
 
             model.eval()
-            ## Evaluation on Test set (clean accuracy) ##
-            evaluator = Evaluator(model, test_loader, criterion, device)
-            clean = evaluator.evaluate_standard()
-            val_acc, val_loss = clean["acc"], clean["loss"]
+            current_lr = scheduler.get_last_lr()[0]
+
+            # ----- Build eval configs from the per-evaluation flags. -----
+            pgd_cfg = None
+            if args.eval_pgd:
+                pgd_cfg = {
+                    "epsilon":   args.epsilon,
+                    "alpha":     args.epsilon / 4.0,
+                    "num_steps": args.pgd_steps,
+                    "norm":      args.pgd_norm,
+                }
+
+            level_cfg = None
+            if args.eval_level:
+                level_cfg = {
+                    "epsilon":    args.epsilon,
+                    "norm":       args.level_norm,
+                    "t":          args.level_t,
+                    "num_starts": args.level_n,
+                    "num_steps":  args.level_steps,
+                }
+
+            # Random-PR baseline — one cfg per requested distribution.
+            random_cfgs = None
+            if args.eval_random:
+                random_cfgs = [
+                    {
+                        "epsilon":      args.epsilon,
+                        "norm":         args.random_norm,
+                        "num_samples":  args.random_n,
+                        "noise_dist":   d,
+                        "return_stats": False,
+                    }
+                    for d in args.random_dist
+                ]
+
+            ## Evaluation on Test set ##
+            test_metrics = evaluate_per_epoch(
+                model, test_loader, device, criterion,
+                pgd_cfg=pgd_cfg, level_cfg=level_cfg, random_cfgs=random_cfgs,
+                eval_name=f"eval-test [{ep}/{args.epochs}]",
+            )
 
             ## Evaluation on Train subset (same size as test set) ##
-            evaluator.update_loader(subtrain_loader)
-            clean_T = evaluator.evaluate_standard()
-            val_acc_T, val_loss_T = clean_T["acc"], clean_T["loss"]
+            train_metrics = evaluate_per_epoch(
+                model, subtrain_loader, device, criterion,
+                pgd_cfg=pgd_cfg, level_cfg=level_cfg, random_cfgs=random_cfgs,
+                eval_name=f"eval-trainS [{ep}/{args.epochs}]",
+            )
+
+            # ----- AutoAttack: only at the final epoch (huge cost). -----
+            aa_test = aa_train = None
+            if args.eval_aa and ep == args.epochs:
+                logger.info(f"[AA] running AutoAttack ({args.aa_version}, "
+                            f"{args.aa_norm}) on test set and train subset "
+                            f"— this can take a while.")
+                aa_test = evaluate_aa(
+                    model, test_loader, device,
+                    norm=args.aa_norm, epsilon=args.epsilon, version=args.aa_version,
+                    eval_name=f"AA-test [{ep}/{args.epochs}]",
+                )
+                aa_train = evaluate_aa(
+                    model, subtrain_loader, device,
+                    norm=args.aa_norm, epsilon=args.epsilon, version=args.aa_version,
+                    eval_name=f"AA-trainS [{ep}/{args.epochs}]",
+                )
 
             current_lr = scheduler.get_last_lr()[0]
+
+            def _pct(v): return f"{v*100:.2f}%" if v is not None else None
+
+            def _line(prefix, m, aa):
+                parts = []
+                if m["clean_loss"] is not None:
+                    parts.append(f"loss={m['clean_loss']:.4f}")
+                parts.append(f"clean={_pct(m['clean_acc'])}")
+                if m["pgd_acc"]    is not None: parts.append(f"pgd{args.pgd_steps}={_pct(m['pgd_acc'])}")
+                if m["level_pr"]  is not None: parts.append(f"level={_pct(m['level_pr'])}")
+                rb = m.get("random_pr_breakdown")
+                if rb:
+                    if len(rb) == 1:
+                        d, v = next(iter(rb.items()))
+                        parts.append(f"rand_{d[:1]}={_pct(v)}")
+                    else:
+                        parts.append("rand=[" + " ".join(
+                            f"{d[:1]}={_pct(v)}" for d, v in rb.items()) + "]")
+                if aa is not None:              parts.append(f"aa={_pct(aa)}")
+                return f"  {prefix}: " + " ".join(parts)
+
             log_msg = (
                 f"[{ep:03d}/{args.epochs}] "
-                f"lr={current_lr:.5f} "
-                f"time={elapsed:.1f}s "
-                f"train_loss={train_loss:.4f} "
-                f"train_acc={train_acc*100:.2f}% "
-                f"| trainS_loss={val_loss_T:.4f} "
-                f"trainS_acc={val_acc_T*100:.2f}% "
-                f"| val_loss={val_loss:.4f} "
-                f"val_acc={val_acc*100:.2f}%"
+                f"lr={current_lr:.5f} time={elapsed:.1f}s "
+                f"train_loss={train_loss:.4f} train_acc={train_acc*100:.2f}%\n"
+                + _line("trainS", train_metrics, aa_train) + "\n"
+                + _line("val   ", test_metrics,  aa_test)
             )
             logger.info(log_msg)
 
+            # CSV: stable schema across epochs even when an eval is disabled.
+            # Random-PR is expanded into one column per distribution.
+            def _r(m, dist):
+                rb = m.get("random_pr_breakdown")
+                return rb.get(dist) if rb else None
+
             epoch_info = {
-                'arch':            args.arch,
-                'dataset':         args.dataset,
-                'training_type':   args.training_type,
-                'epoch':           ep,
-                'lr':              current_lr,
-                'time':            elapsed,
-                'train_loss':      train_loss,
-                'train_acc':       train_acc,
-                'trainS_loss':    val_loss_T,
-                'trainS_acc':     val_acc_T,
-                'val_loss':       val_loss,
-                'val_acc':        val_acc,
+                'arch':                args.arch,
+                'dataset':             args.dataset,
+                'training_type':       args.training_type,
+                'epoch':               ep,
+                'lr':                  current_lr,
+                'time':                elapsed,
+                'train_loss':          train_loss,
+                'train_acc':           train_acc,
+                # train subset (no augmentation) metrics
+                'trainS_loss':         train_metrics['clean_loss'],
+                'trainS_acc':          train_metrics['clean_acc'],
+                'trainS_pgd':          train_metrics['pgd_acc'],
+                'trainS_level':       train_metrics['level_pr'],
+                'trainS_random_g':     _r(train_metrics, 'gaussian'),
+                'trainS_random_u':     _r(train_metrics, 'uniform'),
+                'trainS_random_l':     _r(train_metrics, 'laplace'),
+                'trainS_aa':           aa_train,
+                # test set metrics
+                'val_loss':            test_metrics['clean_loss'],
+                'val_acc':             test_metrics['clean_acc'],
+                'val_pgd':             test_metrics['pgd_acc'],
+                'val_level':          test_metrics['level_pr'],
+                'val_random_g':        _r(test_metrics, 'gaussian'),
+                'val_random_u':        _r(test_metrics, 'uniform'),
+                'val_random_l':        _r(test_metrics, 'laplace'),
+                'val_aa':              aa_test,
             }
             training_history.append(epoch_info)
 
             # overwrite CSV with the full history so far
-            info_csv_path = os.path.join(args.save_dir, f"{args.arch.lower()}_{args.dataset.lower()}_{args.training_type}_training_info.csv")
+            info_csv_path = os.path.join(args.save_dir, f"{name_tag}_training_info.csv")
             pd.DataFrame(training_history).to_csv(info_csv_path, index=False)
             logger.info(f"  -> saved training info to {info_csv_path}")
 

@@ -62,7 +62,7 @@ for DATASET in "${DATASETS[@]}"; do
         echo "  save_dir=${SAVE_DIR}"
         echo "======================================================"
 
-        python scripts/train_classifiers_adv.py \
+        python scripts/train_classifiers.py \
             --dataset        "${DATASET}"       \
             --data_root      "${DATA_ROOT}"     \
             --arch           "${ARCH}"          \
@@ -81,7 +81,6 @@ for DATASET in "${DATASETS[@]}"; do
             --eval_locent --locent_n 8 --locent_steps 10 --locent_norm linf \
             --eval_random --random_n 8 --random_norm linf \
             --random_dist gaussian uniform laplace \
-            --eval_corruptions --corruption_severities 1 \
             --save_dir       "${SAVE_DIR}"
     done
 done

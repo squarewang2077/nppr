@@ -48,7 +48,7 @@ from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
 from utils.evaluator import Evaluator
 from utils.utils import load_gmm_model, check_mode_collapse
-from src.adv_attacker import pgd_attack, cw_attack
+from src.adv_loss import pgd_attack, cw_attack
 
 
 # ------------------------------------------------------------------

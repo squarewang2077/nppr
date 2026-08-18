@@ -1,14 +1,14 @@
-# eval_prob_perturbations(LocEnt).py
+# eval_prob_perturbations(Level).py
 #   Evaluate a trained classifier under a Local-Entropy probabilistic attack.
 #
 # Description:
 #   Given a checkpoint (.pth) produced by scripts/train_classifiers.py,
-#   scripts/train_classifiers_pr.py, or scripts/train_classifiers_adv.py,
-#   this script loads the model and runs the local-entropy Langevin attack
+#   the level-set trainer or scripts/train_classifiers.py,
+#   this script loads the model and runs the level-set Langevin attack
 #   on the test set. It DOES NOT update model weights.
 #
 #   For every test batch, the attack draws N adversarial particles per input
-#   using local-entropy Langevin dynamics. The script reports:
+#   using level-set Langevin dynamics. The script reports:
 #
 #     clean_acc        - top-1 accuracy on clean test inputs.
 #     mean_pr          - mean fraction of N particles that the model still
@@ -23,14 +23,14 @@
 #                        particle fooled the model.
 #
 #   Outputs:
-#     <save_dir>/<arch>_<dataset>_locent_attack.log         text log
-#     <save_dir>/<arch>_<dataset>_locent_attack_summary.csv summary metrics
+#     <save_dir>/<arch>_<dataset>_level_attack.log         text log
+#     <save_dir>/<arch>_<dataset>_level_attack_summary.csv summary metrics
 #
 # Usage:
-#   python scripts/eval_prob_perturbations\(LocEnt\).py \
+#   python scripts/eval_prob_perturbations\(Level\).py \
 #       --ckpt ./ckp/.../resnet18_cifar10_loc_entropy.pth \
 #       --dataset cifar10 --arch resnet18 \
-#       --epsilon 0.03137 --num_particles 8 --langevin_steps 20 --gamma 0.05
+#       --epsilon 0.03137 --num_starts 8 --num_steps 50 --t 0.0
 
 import os
 import csv
@@ -47,22 +47,12 @@ from tqdm import tqdm
 
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
-from src.local_entropy4pr import (
-    ParticleState,
-    EnergyConfig,
-    LangevinConfig,
-    compute_margins,
-    fixed_threshold_update,
-    adaptive_threshold_update,
-    fixed_scope,
-    dynamic_scope,
-    langevin_update_local_entropy,
-)
+from src.pos_geo_loss import solve_level_perturbations
 
 
 def setup_logger(log_path: str) -> logging.Logger:
     """Return a logger that writes to both stdout and *log_path*."""
-    logger = logging.getLogger("eval_locent_attack")
+    logger = logging.getLogger("eval_level_attack")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     fmt = logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -90,74 +80,26 @@ def set_seed(seed: int = 42):
 #                Local-entropy adversarial generator
 # ------------------------------------------------------------------
 
-def local_entropy_generator(model, x, y, **kwargs):
+def level_generator(model, x, y, **kwargs):
     """
-    Run one local-entropy attack on a clean batch.
+    Run one margin level-set attack on a clean batch.
 
     Returns:
-        x_adv: adversarial particles, shape (B, N, C, H, W).
+        x_adv: perturbed inputs, shape (B, N, C, H, W).
     """
-    norm = kwargs.get("norm", "linf")
-    epsilon = kwargs.get("epsilon", 8 / 255)
-    num_particles = kwargs.get("num_particles", 8)
-    langevin_steps = kwargs.get("langevin_steps", 5)
-    step_size = kwargs.get("step_size", 1e-2)
-    langevin_beta = kwargs.get("langevin_beta", 100.0)
-    noise_scale = kwargs.get("noise_scale", 1.0)
-    gamma = kwargs.get("gamma", 1.0)
-    psi_type = kwargs.get("psi_type", "softplus")
-    psi_alpha = kwargs.get("psi_alpha", 10.0)
-    threshold_mode = kwargs.get("threshold_mode", "fixed")
-    t0 = kwargs.get("t0", 0.0)
-    t_floor = kwargs.get("t_floor", 0.0)
-    scope_mode = kwargs.get("scope_mode", "fixed")
-    init_method = kwargs.get("init_method", "uniform")
-
-    particle_state = ParticleState(epsilon=epsilon, norm=norm, num_particles=num_particles)
-
-    energy_cfg = EnergyConfig(psi_type=psi_type, psi_alpha=psi_alpha)
-    langevin_cfg = LangevinConfig(
-        steps=langevin_steps,
-        step_size=step_size,
-        beta=langevin_beta,
-        noise_scale=noise_scale,
+    delta, _, _ = solve_level_perturbations(
+        model, x, y,
+        t=kwargs.get("t", 0.0),
+        epsilon=kwargs.get("epsilon", 8 / 255),
+        num_starts=kwargs.get("num_starts", 8),
+        num_steps=kwargs.get("num_steps", 50),
+        step_size=kwargs.get("step_size", 1e-2),
+        anchor_lambda=kwargs.get("anchor_lambda", 0.02),
+        alpha=kwargs.get("psi_alpha", 10.0),
+        tol=kwargs.get("tol", 0.05),
+        norm=kwargs.get("norm", "linf"),
     )
-
-    particle_state.init_particles(x, method=init_method, warm_start=False)
-
-    if threshold_mode == "fixed":
-        B, N = x.shape[0], num_particles
-        margins = torch.zeros((B, N), device=x.device, dtype=x.dtype)
-        t_curr = fixed_threshold_update(margins=margins, state=particle_state, t=t0)
-    elif threshold_mode == "adaptive":
-        margins = compute_margins(model=model, x=x, y=y, state=particle_state)
-        t_curr = adaptive_threshold_update(
-            margins=margins, state=particle_state, t0=t0, t_floor=t_floor
-        )
-    else:
-        B, N = x.shape[0], num_particles
-        margins = torch.zeros((B, N), device=x.device, dtype=x.dtype)
-        t_curr = fixed_threshold_update(margins=margins, state=particle_state, t=t0)
-
-    if scope_mode == "fixed":
-        gamma_curr = fixed_scope(t_curr=t_curr, gamma=gamma)
-    elif scope_mode == "dynamic":
-        gamma_curr = dynamic_scope(t_curr=t_curr, t0=t0, t_floor=t_floor)
-    else:
-        gamma_curr = fixed_scope(t_curr=t_curr, gamma=gamma)
-
-    langevin_update_local_entropy(
-        state=particle_state,
-        model=model,
-        x=x,
-        y=y,
-        t_curr=t_curr,
-        gamma_curr=gamma_curr,
-        energy_cfg=energy_cfg,
-        cfg=langevin_cfg,
-    )
-
-    return particle_state.x_adv
+    return (x.unsqueeze(1) + delta).clamp(0.0, 1.0)
 
 
 # ------------------------------------------------------------------
@@ -178,7 +120,7 @@ def attack_batch(model, x, y, attack_cfg):
     # Generate adversarial particles. The Langevin update needs autograd
     # through the model w.r.t. inputs (NOT parameters), so we leave the
     # outer torch.no_grad() — autograd.grad inside the sampler still works.
-    x_adv = local_entropy_generator(model, x, y, **attack_cfg)
+    x_adv = level_generator(model, x, y, **attack_cfg)
     B, N, C, H, W = x_adv.shape
 
     with torch.no_grad():
@@ -224,30 +166,22 @@ def main():
     ap.add_argument("--epsilon", type=float, default=8 / 255,
                     help="Perturbation budget. For linf on CIFAR, 8/255 is standard.")
     ap.add_argument("--norm", choices=["linf", "l2"], default="linf")
-    ap.add_argument("--num_particles", type=int, default=8,
-                    help="Number of adversarial particles per input.")
-    ap.add_argument("--init_method", type=str, default="uniform",
-                    choices=["zero", "gaussian", "uniform"])
+    ap.add_argument("--num_starts", type=int, default=8,
+                    help="Number of level-set perturbations per input.")
 
     # ============================================================
-    # Attack: Langevin dynamics
+    # Attack: level-set solver
     # ============================================================
-    ap.add_argument("--langevin_steps", type=int, default=10,
-                    help="Number of Langevin steps (typically larger than during training).")
+    ap.add_argument("--t", type=float, default=0.0,
+                    help="Target margin level. Perturbations are driven onto m = t.")
+    ap.add_argument("--num_steps", type=int, default=50,
+                    help="Solver steps (typically larger than during training).")
     ap.add_argument("--step_size", type=float, default=1e-2)
-    ap.add_argument("--langevin_beta", type=float, default=100.0)
-    ap.add_argument("--noise_scale", type=float, default=1.0)
-
-    # ============================================================
-    # Attack: energy + threshold + scope
-    # ============================================================
-    ap.add_argument("--psi_type", type=str, default="softplus", choices=["softplus", "hinge"])
+    ap.add_argument("--anchor_lambda", type=float, default=0.02,
+                    help="L2 pull toward each random start. Keep small.")
     ap.add_argument("--psi_alpha", type=float, default=10.0)
-    ap.add_argument("--threshold_mode", type=str, default="fixed", choices=["fixed", "adaptive"])
-    ap.add_argument("--t0", type=float, default=-0.05)
-    ap.add_argument("--t_floor", type=float, default=0.0)
-    ap.add_argument("--scope_mode", type=str, default="fixed", choices=["fixed", "dynamic"])
-    ap.add_argument("--gamma", type=float, default=0.05)
+    ap.add_argument("--tol", type=float, default=0.05,
+                    help="|m - t| <= tol counts as reaching the level.")
     ap.add_argument("--gamma_min", type=float, default=0.1)
     ap.add_argument("--gamma_max", type=float, default=10.0)
 
@@ -256,7 +190,7 @@ def main():
     # ============================================================
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", type=str, default="cuda")
-    ap.add_argument("--save_dir", type=str, default="./results/locent_attack",
+    ap.add_argument("--save_dir", type=str, default="./results/level_attack",
                     help="Directory to write log and summary CSV.")
     ap.add_argument("--tag", type=str, default=None,
                     help="Optional run tag appended to output filenames "
@@ -272,7 +206,7 @@ def main():
     # Output paths
     os.makedirs(args.save_dir, exist_ok=True)
     suffix = f"_{args.tag}" if args.tag else ""
-    base = f"{args.arch.lower()}_{args.dataset.lower()}_locent_attack{suffix}"
+    base = f"{args.arch.lower()}_{args.dataset.lower()}_level_attack{suffix}"
     log_path = os.path.join(args.save_dir, f"{base}.log")
     csv_path = os.path.join(args.save_dir, f"{base}_summary.csv")
     logger = setup_logger(log_path)
@@ -281,13 +215,10 @@ def main():
     logger.info(f"[config] ckpt={args.ckpt}")
     logger.info(f"[config] dataset={args.dataset}, arch={args.arch}, img_size={img_size}")
     logger.info(f"[config] epsilon={args.epsilon:.4f}, norm={args.norm}, "
-                f"num_particles={args.num_particles}, langevin_steps={args.langevin_steps}")
-    logger.info(f"[config] step_size={args.step_size}, langevin_beta={args.langevin_beta}, "
-                f"noise_scale={args.noise_scale}")
-    logger.info(f"[config] psi_type={args.psi_type}, psi_alpha={args.psi_alpha}, "
-                f"threshold_mode={args.threshold_mode}, t0={args.t0}, t_floor={args.t_floor}")
-    logger.info(f"[config] scope_mode={args.scope_mode}, gamma={args.gamma}, "
-                f"init_method={args.init_method}")
+                f"num_starts={args.num_starts}, num_steps={args.num_steps}")
+    logger.info(f"[config] t={args.t}, step_size={args.step_size}, "
+                f"anchor_lambda={args.anchor_lambda}")
+    logger.info(f"[config] psi_alpha={args.psi_alpha}, tol={args.tol}")
 
     # Test set (no augmentation)
     test_set, num_classes = get_dataset(args.dataset, args.data_root, False, img_size, augment=False)
@@ -312,23 +243,17 @@ def main():
             if k in ckpt:
                 logger.info(f"[load] ckpt.{k} = {ckpt[k]}")
 
-    # Attack config (forwarded to local_entropy_generator)
+    # Attack config (forwarded to level_generator)
     attack_cfg = {
         "norm": args.norm,
         "epsilon": args.epsilon,
-        "num_particles": args.num_particles,
-        "langevin_steps": args.langevin_steps,
+                "num_starts": args.num_starts,
+        "num_steps": args.num_steps,
         "step_size": args.step_size,
-        "langevin_beta": args.langevin_beta,
-        "noise_scale": args.noise_scale,
-        "gamma": args.gamma,
-        "psi_type": args.psi_type,
+        "t": args.t,
+        "anchor_lambda": args.anchor_lambda,
         "psi_alpha": args.psi_alpha,
-        "threshold_mode": args.threshold_mode,
-        "t0": args.t0,
-        "t_floor": args.t_floor,
-        "scope_mode": args.scope_mode,
-        "init_method": args.init_method,
+        "tol": args.tol,
     }
 
     # ============================================================
@@ -372,7 +297,7 @@ def main():
     worst_acc = n_worst_correct / n_total
     mean_pr = sum_per_particle / n_total
     attack_success = n_any_fooled / n_total
-    raw_pp_acc = sum_per_particle_correct / (n_total * args.num_particles)  # equals mean_pr
+    raw_pp_acc = sum_per_particle_correct / (n_total * args.num_starts)  # equals mean_pr
 
     # ============================================================
     # Report
@@ -380,7 +305,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"[result] clean_acc       = {clean_acc * 100:.2f}%   ({n_clean_correct}/{n_total})")
     logger.info(f"[result] worst_acc       = {worst_acc * 100:.2f}%   "
-                f"(fraction of samples where ALL {args.num_particles} particles still correct)")
+                f"(fraction of samples where ALL {args.num_starts} particles still correct)")
     logger.info(f"[result] mean_pr         = {mean_pr * 100:.2f}%   "
                 f"(mean fraction of correct particles per sample)")
     logger.info(f"[result] attack_success  = {attack_success * 100:.2f}%   "
@@ -397,18 +322,13 @@ def main():
         "img_size": img_size,
         "norm": args.norm,
         "epsilon": args.epsilon,
-        "num_particles": args.num_particles,
-        "langevin_steps": args.langevin_steps,
+                "num_starts": args.num_starts,
+        "num_steps": args.num_steps,
         "step_size": args.step_size,
-        "langevin_beta": args.langevin_beta,
-        "noise_scale": args.noise_scale,
-        "gamma": args.gamma,
-        "psi_type": args.psi_type,
+        "t": args.t,
+        "anchor_lambda": args.anchor_lambda,
         "psi_alpha": args.psi_alpha,
-        "threshold_mode": args.threshold_mode,
-        "t0": args.t0,
-        "scope_mode": args.scope_mode,
-        "init_method": args.init_method,
+        "tol": args.tol,
         "n_total": n_total,
         "clean_acc": clean_acc,
         "worst_acc": worst_acc,

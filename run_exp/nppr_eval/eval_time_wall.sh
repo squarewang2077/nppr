@@ -12,7 +12,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
 # ------------------------------------------------------------------
-# Wall-time analysis for all four evaluation types.
+# Wall-time analysis for all three evaluation types.
 # Mirrors eval_all.sh: same models, datasets, checkpoints, args.
 # Reports per-eval-type and per-combo timing, plus a grand total.
 # ------------------------------------------------------------------
@@ -71,7 +71,7 @@ for dataset in "${DATASETS[@]}"; do
             --ckp_path "${CLF_CKPT}" \
             --save_csv "${RESULTS_DIR}/eval_clean_${model}_${dataset}.csv"
         T1=$(date +%s%N)
-        echo "  [1/4] clean          : $(elapsed $T0 $T1) s"
+        echo "  [1/3] clean          : $(elapsed $T0 $T1) s"
 
         # ── 2. Adversarial robustness ────────────────────────────────
         T0=$(date +%s%N)
@@ -84,21 +84,11 @@ for dataset in "${DATASETS[@]}"; do
             --no_aa \
             --save_csv "${RESULTS_DIR}/eval_adv_${model}_${dataset}.csv"
         T1=$(date +%s%N)
-        echo "  [2/4] adversarial    : $(elapsed $T0 $T1) s"
+        echo "  [2/3] adversarial    : $(elapsed $T0 $T1) s"
 
-        # ── 3. Corruption robustness ─────────────────────────────────
-        T0=$(date +%s%N)
-        python scripts/eval_corruptions.py \
-            --arch "${model}" \
-            --dataset "${dataset}" \
-            --ckp_path "${CLF_CKPT}" \
-            --save_csv "${RESULTS_DIR}/eval_corruptions_${model}_${dataset}.csv"
-        T1=$(date +%s%N)
-        echo "  [3/4] corruptions    : $(elapsed $T0 $T1) s"
-
-        # ── 4. Probabilistic robustness ──────────────────────────────
+        # ── 3. Probabilistic robustness ──────────────────────────────
         if [ ! -f "${GMM_CKPT}" ]; then
-            echo "  [4/4] prob_pert      : SKIPPED (GMM checkpoint not found)"
+            echo "  [3/3] prob_pert      : SKIPPED (GMM checkpoint not found)"
         else
             T0=$(date +%s%N)
             python scripts/eval_prob_perturbation.py \
@@ -110,7 +100,7 @@ for dataset in "${DATASETS[@]}"; do
                 --gmm_path "${GMM_CKPT}" \
                 --save_csv "${RESULTS_DIR}/eval_prob_perturbation_${model}_${dataset}.csv"
             T1=$(date +%s%N)
-            echo "  [4/4] prob_pert      : $(elapsed $T0 $T1) s"
+            echo "  [3/3] prob_pert      : $(elapsed $T0 $T1) s"
         fi
 
         COMBO_END=$(date +%s%N)

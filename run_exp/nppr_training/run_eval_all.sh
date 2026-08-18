@@ -2,7 +2,7 @@
 # run_eval_all.sh
 # Evaluate one or more trained classifier checkpoints with scripts/eval_all.py.
 # Reports clean test accuracy, PGD-10 robust accuracy, random-PR for
-# Gaussian / Uniform / Laplace noise, and accuracy under all 4 corruptions
+# Gaussian / Uniform / Laplace noise
 # (salt_pepper, motion_blur, brightness, jpeg) at the chosen severity levels.
 #
 # arch and dataset are auto-detected from each checkpoint, so the same
@@ -43,10 +43,6 @@ PGD_STEPS=10
 # Random-PR eval
 RANDOM_N=10
 RANDOM_DISTS=("gaussian" "uniform" "laplace")
-
-# Corruption eval
-CORRUPTION_NAMES=("salt_pepper" "motion_blur" "brightness" "jpeg")
-CORRUPTION_SEVERITIES=(1 3 5)
 
 # Where to write the per-ckpt CSV summary. Set to "" to disable CSV output.
 SAVE_CSV_DIR="./results/nppr_training/eval_all"
@@ -115,8 +111,6 @@ echo "======================================================"
 echo "  Using GPU: ${GPU_ID}"
 echo "  Checkpoints: ${#CKPT_LIST[@]}"
 echo "  Random dists: ${RANDOM_DISTS[*]}"
-echo "  Corruptions:  ${CORRUPTION_NAMES[*]}"
-echo "  Severities:   ${CORRUPTION_SEVERITIES[*]}"
 [[ -n "${SAVE_CSV_DIR}" ]] && echo "  CSV output:   ${SAVE_CSV_DIR}"
 echo "======================================================"
 echo ""
@@ -152,8 +146,6 @@ for CKPT in "${CKPT_LIST[@]}"; do
         --pgd_steps      "${PGD_STEPS}"       \
         --random_n       "${RANDOM_N}"        \
         --random_dist    "${RANDOM_DISTS[@]}" \
-        --corruption_names "${CORRUPTION_NAMES[@]}"   \
-        --corruption_severities "${CORRUPTION_SEVERITIES[@]}" \
         "${CSV_ARG[@]}"
 done
 

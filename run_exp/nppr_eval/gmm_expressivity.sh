@@ -18,7 +18,7 @@ export CUDA_VISIBLE_DEVICES=1
 # Output  : ./results/gmm_expressivity/
 # ------------------------------------------------------------------
 for num_modes in 1 3 5 7; do
-    python scripts/train_mixture.py \
+    python scripts/nppr_eval/train_mixture.py \
         --arch resnet18 \
         --dataset cifar10 \
         --clf_ckpt ./ckp/standard/resnet/resnet18_cifar10.pth \

@@ -65,7 +65,7 @@ for dataset in "${DATASETS[@]}"; do
 
         COMBO_START=$(date +%s%N)
 
-        python scripts/train_mixture.py \
+        python scripts/nppr_eval/train_mixture.py \
             --dataset "${dataset}" \
             --arch "${model}" \
             --clf_ckpt "${CLF_CKPT}" \

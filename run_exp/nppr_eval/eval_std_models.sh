@@ -22,8 +22,7 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 # Evaluations:
 #   1. Clean accuracy          (eval_clean.py)
 #   2. Adversarial robustness  (eval_adv_examples.py)
-#   3. Corruption robustness   (eval_corruptions.py)
-#   4. Probabilistic robustness (eval_prob_perturbation.py)
+#   3. Probabilistic robustness (eval_prob_perturbation.py)
 # ------------------------------------------------------------------
 
 STD_CKPT_DIR="${PROJECT_ROOT}/ckp/standard"
@@ -77,7 +76,7 @@ for dataset in "${DATASETS[@]}"; do
         mkdir -p "${RESULTS_DIR}"
 
         # ── 1. Clean accuracy ────────────────────────────────────────
-        echo "  [1/4] Clean accuracy..."
+        echo "  [1/3] Clean accuracy..."
         python scripts/eval_clean.py \
             --arch "${model}" \
             --dataset "${dataset}" \
@@ -85,7 +84,7 @@ for dataset in "${DATASETS[@]}"; do
             --save_csv "${RESULTS_DIR}/eval_clean_${model}_${dataset}.csv"
 
         # ── 2. Adversarial robustness (PGD / CW, no AutoAttack) ─────
-        echo "  [2/4] Adversarial robustness..."
+        echo "  [2/3] Adversarial robustness..."
         python scripts/eval_adv_examples.py \
             --arch "${model}" \
             --dataset "${dataset}" \
@@ -94,16 +93,8 @@ for dataset in "${DATASETS[@]}"; do
             --pgd_steps 10 --cw_steps 10 \
             --save_csv "${RESULTS_DIR}/eval_adv_${model}_${dataset}.csv"
 
-        # ── 3. Corruption robustness ─────────────────────────────────
-        echo "  [3/4] Corruption robustness..."
-        python scripts/eval_corruptions.py \
-            --arch "${model}" \
-            --dataset "${dataset}" \
-            --ckp_path "${CLF_CKPT}" \
-            --save_csv "${RESULTS_DIR}/eval_corruptions_${model}_${dataset}.csv"
-
-        # ── 4. Probabilistic robustness ──────────────────────────────
-        echo "  [4/4] Probabilistic robustness..."
+        # ── 3. Probabilistic robustness ──────────────────────────────
+        echo "  [3/3] Probabilistic robustness..."
         if [ ! -f "${GMM_CKPT}" ]; then
             echo "  WARNING: GMM checkpoint not found: ${GMM_CKPT}"
             echo "  Skipping probabilistic robustness for this combo."

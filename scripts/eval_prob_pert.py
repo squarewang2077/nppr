@@ -27,9 +27,7 @@ import pandas as pd
 
 from arch import build_model, build_feat_extractor
 from utils.preprocess_data import get_dataset, get_img_size
-from src.langevin4pr import pr_generator
 from utils.evaluator import Evaluator
-from utils import build_sigma_list
 from pathlib import Path
 
 
@@ -128,15 +126,6 @@ def main():
     # ---- PR attack settings ----
     ap.add_argument("--norm", choices=["linf", "l2"], default="linf")
     ap.add_argument("--epsilon", type=float, default=8/255)
-    ap.add_argument("--beta_mix", type=float, default=1)
-    ap.add_argument("--kappa", type=float, default=1.0)
-    ap.add_argument("--K", type=int, default=3,
-                    help="Number of GMM components for PR attack")
-    ap.add_argument("--sigma_dist_type", type=str, default="geometric",
-                    choices=["linear", "geometric", "full"])
-    ap.add_argument("--fisher_damping", type=float, default=1e-7)
-    ap.add_argument("--tau", type=float, default=1e-4)
-    ap.add_argument("--noise_scale", type=float, default=1.0)
     ap.add_argument("--num_samples", type=int, default=32,
                     help="Number of perturbation samples per input (N)")
     ap.add_argument("--no_pr_random", action="store_true", default=False,
@@ -250,21 +239,6 @@ def main():
 
     criterion = nn.CrossEntropyLoss()
 
-    sigma_list = build_sigma_list(epsilon=args.epsilon, K=args.K,
-                                  mode_type=args.sigma_dist_type)
-    pr_config = {
-        "norm":           args.norm,
-        "epsilon":        args.epsilon,
-        "beta_mix":       args.beta_mix,
-        "kappa":          args.kappa,
-        "K":              args.K,
-        "sigma_list":     sigma_list,
-        "fisher_damping": args.fisher_damping,
-        "tau":            args.tau,
-        "noise_scale":    args.noise_scale,
-        "num_samples":    args.num_samples,
-    }
-
     results = {
         "arch": arch, "dataset": dataset,
         "training_type": training_type, "ckp_path": args.ckp_path,
@@ -286,27 +260,10 @@ def main():
 
         evaluator = Evaluator(model, loader, criterion, device)
 
-        # 1. PR (Langevin)
-        print(f"[1] PR evaluation  (N={args.num_samples}, K={args.K}) ...")
-        _t0 = time.perf_counter()
-        pr = evaluator.evaluate_pr(
-            pr_generator=pr_generator,
-            eval_name=f"PR-{args.num_samples}",
-            **pr_config,
-        )
-        _t_pr = time.perf_counter() - _t0
-        print(f"    pr={pr['pr']*100:.2f}%  "
-              f"D={pr['stats']['D_proxy']:.3e}  Hpi={pr['stats']['pi_entropy']:.3f}"
-              f"  [{_t_pr:.1f}s]")
-        results[f"{split}_pr"] = pr["pr"]
-        results[f"{split}_pr_time"] = _t_pr
-        for k, v in pr.get("stats", {}).items():
-            results[f"{split}_pr_{k}"] = v
-
-        # 2. PR random baselines — Gaussian, Uniform, Laplace
+        # 1. PR random baselines — Gaussian, Uniform, Laplace
         if not args.no_pr_random:
             for _dist in ("gaussian", "uniform", "laplace"):
-                print(f"[2] PR random evaluation  "
+                print(f"[1] PR random evaluation  "
                       f"(N={args.num_samples}, dist={_dist}) ...")
                 _t0 = time.perf_counter()
                 _pr_rand = evaluator.evaluate_pr_random(
@@ -326,9 +283,9 @@ def main():
                     if isinstance(v, (int, float)):
                         results[f"{split}_pr_rand_{_dist}_{k}"] = v
 
-        # 3. Mixture-based PR
+        # 2. Mixture-based PR
         if mixture is not None:
-            print(f"[3] PR Mixture evaluation  "
+            print(f"[2] PR Mixture evaluation  "
                   f"(N={args.num_samples}, feat={_mix_feat_arch}, "
                   f"ε={_mix_eval_eps:.4f}, norm={_mix_eval_norm}) ...")
             _t0 = time.perf_counter()
@@ -357,7 +314,6 @@ def main():
     print(f"{'='*60}")
     print(f"  Checkpoint    : {args.ckp_path}")
     print(f"  Arch / Dataset: {arch} / {dataset}  [{training_type}]")
-    print(f"  PR            : N={args.num_samples}, K={args.K}")
     if not args.no_pr_random:
         print(f"  PR random     : N={args.num_samples}, dists=gaussian,uniform,laplace")
     if mixture is not None:

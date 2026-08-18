@@ -63,7 +63,7 @@ for dataset in "${DATASETS[@]}"; do
         CKP_DIR="${BASE_CKP_DIR}"
 
         # Run training
-        python scripts/train_gmm.py \
+        python scripts/nppr_eval/train_gmm.py \
             --dataset "${dataset}" \
             --arch "${model}" \
             --clf_ckpt "${CLF_CKPT}" \

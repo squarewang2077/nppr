@@ -17,14 +17,14 @@ def pr_random_generator(model, x, y,
                          **kwargs):
     """
     Random-baseline perturbation generator with the same interface as
-    pr_generator in src/langevin4pr.py.
+    the GMM/mixture perturbation generators (see pr_gmm_generator below).
 
     Instead of computing a gradient-guided posterior, it samples N deltas
     per input i.i.d. from a chosen distribution, projects each onto the
     epsilon-ball, and returns the perturbed inputs.
 
     Args:
-        model : not used — kept for API compatibility with pr_generator.
+        model : not used — kept for API compatibility with the other generators.
         x     : clean inputs (B, C, H, W), values in [0, 1].
         y     : not used — kept for API compatibility.
         epsilon     : perturbation budget radius.
@@ -34,8 +34,8 @@ def pr_random_generator(model, x, y,
                       "gaussian"  ~ N(0, epsilon^2 * I)  then projected,
                       "uniform"   ~ Uniform(-epsilon, epsilon)^d then projected,
                       "laplace"   ~ Laplace(0, epsilon) then projected.
-        return_stats: whether to return a stats dict (matches pr_generator API).
-        **kwargs    : absorbs unused pr_generator parameters (K, sigma_list,
+        return_stats: whether to return a stats dict (matches the generator API).
+        **kwargs    : absorbs unused generator parameters (K, sigma_list,
                       beta_mix, kappa, fisher_damping, tau, noise_scale, …)
                       so this function can be called with the same config dict.
 
@@ -75,7 +75,7 @@ def pr_random_generator(model, x, y,
     delta = delta_flat.view(B, N, C, H, W)
 
     # ------------------------------------------------------------------
-    # 2) Project onto epsilon-ball (matches pr_generator step 5)
+    # 2) Project onto the epsilon-ball
     # ------------------------------------------------------------------
     if norm in ("linf", "l_inf", "l-infty"):
         delta = delta.clamp(-epsilon, epsilon)
@@ -241,7 +241,7 @@ def pr_gmm_generator(model, x, y, gmm,
                       epsilon=None, norm=None,
                       **kwargs):
     """
-    GMM-based perturbation generator matching the pr_generator interface.
+    GMM-based perturbation generator matching the shared generator interface.
 
     Uses a trained GMM4PR model to draw N perturbation samples per input.
     By default the perturbation budget (epsilon, norm) comes from the GMM's
@@ -267,7 +267,7 @@ def pr_gmm_generator(model, x, y, gmm,
                       If None the GMM's training epsilon is used unchanged.
         norm        : override the perturbation norm ("linf" or "l2") at
                       evaluation time.  If None the GMM's training norm is used.
-        **kwargs    : absorbs unused pr_generator parameters (K, sigma_list,
+        **kwargs    : absorbs unused generator parameters (K, sigma_list,
                       beta_mix, …) for drop-in compatibility.
 
     Returns:
@@ -371,56 +371,3 @@ def check_mode_collapse(gmm, loader, device, num_batches=10):
 # ------------------------------------------------------------------
 #   Helper function to build sigma_list for GMM prior
 # ------------------------------------------------------------------
-
-def build_sigma_list(
-    epsilon: float,
-    K: int,
-    mode_type: str = "linear",
-    *,
-    min_ratio: float = 0.4,
-    rho: float = 0.5,
-):
-    """
-    Build sigma_list for GMM prior (L_inf setting).
-
-    Args:
-        epsilon: perturbation budget (L_inf radius)
-        K: number of mixture modes
-        mode_type:
-            - "linear"    : evenly spaced from min_ratio*ε to ε  (recommended)
-            - "geometric" : geometric progression ending at ε
-            - "full"      : evenly spaced from ε/K to ε
-        min_ratio: smallest sigma as fraction of epsilon (for linear)
-        rho: geometric ratio (for geometric)
-
-    Returns:
-        sigma_list: list of length K
-    """
-    if K <= 0:
-        raise ValueError("K must be positive.")
-
-    mode_type = mode_type.lower()
-
-    if mode_type == "linear":
-        sigma_list = torch.linspace(
-            min_ratio * epsilon,
-            epsilon,
-            steps=K
-        ).tolist()
-
-    elif mode_type == "geometric":
-        sigma_list = [
-            epsilon * (rho ** (K - 1 - k))
-            for k in range(K)
-        ]
-
-    elif mode_type == "full":
-        sigma_list = [
-            epsilon * (k + 1) / K
-            for k in range(K)
-        ]
-
-    else:
-        raise ValueError(f"Unknown mode_type: {mode_type}")
-
-    return sigma_list

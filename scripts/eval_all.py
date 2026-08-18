@@ -1,14 +1,12 @@
 # scripts/eval_all.py - One-shot evaluation of a trained classifier.
 #
-# Loads a checkpoint saved by train_classifiers_pr.py or
-# train_classifiers_adv.py, builds the matching test set, and reports:
+# Loads a checkpoint saved by train_classifiers.py or the level-set trainer,
+# builds the matching test set, and reports:
 #
 #   * Clean test accuracy
 #   * PGD-10 robust accuracy
 #   * Probabilistic Robustness under random Gaussian / Uniform / Laplace
 #     noise (mean fraction of N draws that stay correctly classified)
-#   * Accuracy under 4 corruption methods (salt_pepper, motion_blur,
-#     brightness, jpeg) at one or more severity levels
 #
 # A formatted summary is printed to the terminal. Optionally writes a flat
 # one-row CSV with every metric for downstream aggregation.
@@ -23,16 +21,19 @@
 #
 #   python scripts/eval_all.py \
 #       --ckpt ./ckp/nppr_training/adv_training/cifar10/resnet18/pgd10_Aug/resnet18_cifar10_adv_pgd_Aug.pth \
-#       --corruption_severities 1 3 5 \
 #       --save_csv ./results/eval_pgd_aug.csv
 
 import argparse
 import os
+import random
 import sys
 import time
 
+import numpy as np
+
 import torch
 import torch.nn as nn
+import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 
 # Ensure project root is importable when invoked as `python scripts/eval_all.py`.
@@ -42,8 +43,22 @@ if PROJECT_ROOT not in sys.path:
 
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
-from utils.corrupter import CORRUPTION_FNS
-from scripts.train_classifiers_pr import evaluate_per_epoch, set_seed
+from utils.epoch_eval import evaluate_per_epoch
+
+
+def set_seed(seed: int = 42):
+    """Seed every RNG used by the eval pipeline + force deterministic cuDNN.
+
+    Eval-time determinism matters more than throughput, so cuDNN benchmark is
+    disabled here — the opposite of what the trainers do.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    cudnn.deterministic = True
+    cudnn.benchmark = False
+
 
 
 # ------------------------------------------------------------------
@@ -52,7 +67,7 @@ from scripts.train_classifiers_pr import evaluate_per_epoch, set_seed
 
 def parse_args():
     ap = argparse.ArgumentParser(
-        description="Evaluate a trained classifier on clean / PGD / random-PR / corruption metrics."
+        description="Evaluate a trained classifier on clean / PGD / random-PR metrics."
     )
     ap.add_argument("--ckpt", required=True, type=str,
                     help="Path to .pth checkpoint saved by the training scripts.")
@@ -78,13 +93,6 @@ def parse_args():
     ap.add_argument("--random_dist", nargs="+",
                     choices=["gaussian", "uniform", "laplace"],
                     default=["gaussian", "uniform", "laplace"])
-
-    # Corruption knobs
-    ap.add_argument("--corruption_names", nargs="+",
-                    default=list(CORRUPTION_FNS.keys()),
-                    choices=list(CORRUPTION_FNS.keys()))
-    ap.add_argument("--corruption_severities", nargs="+", type=int, default=[3],
-                    help="Severity levels (1-5). Default: 3 (moderate).")
 
     ap.add_argument("--save_csv", type=str, default=None,
                     help="Optional CSV path for a flat one-row summary.")
@@ -129,22 +137,6 @@ def print_summary(args, ckpt, metrics):
     for d in args.random_dist:
         print(f"     - {d:<{label_w - 5}}: {_pct(rb.get(d))}")
 
-    cb = metrics.get("corr_breakdown") or {}
-    print(f"  Corruption accuracy")
-    single_sev = len(args.corruption_severities) == 1
-    for c in args.corruption_names:
-        if single_sev:
-            s = args.corruption_severities[0]
-            v = cb.get((c, s))
-            label = f"{c} (sev={s})"
-            print(f"     - {label:<{label_w - 5}}: {_pct(v)}")
-        else:
-            sev_str = "  ".join(
-                f"sev{s}={_pct(cb.get((c, s)))}" for s in args.corruption_severities
-            )
-            print(f"     - {c:<{label_w - 5}}: {sev_str}")
-    if metrics["corr_acc"] is not None:
-        print(f"  {'Corruption mean accuracy':<{label_w}}: {_pct(metrics['corr_acc'])}")
     print(bar)
     print()
 
@@ -167,12 +159,6 @@ def write_csv(args, ckpt, metrics, dataset, arch):
     rb = metrics.get("random_pr_breakdown") or {}
     for d in args.random_dist:
         row[f"random_{d}"] = rb.get(d)
-
-    cb = metrics.get("corr_breakdown") or {}
-    for c in args.corruption_names:
-        for s in args.corruption_severities:
-            row[f"corr_{c}_s{s}"] = cb.get((c, s))
-    row["corr_mean"] = metrics["corr_acc"]
 
     out_dir = os.path.dirname(os.path.abspath(args.save_csv))
     if out_dir:
@@ -242,10 +228,8 @@ def main():
         device=device,
         criterion=nn.CrossEntropyLoss(),
         pgd_cfg=pgd_cfg,
-        locent_cfg=None,
+        level_cfg=None,
         random_cfgs=random_cfgs,
-        corruptions=args.corruption_names,
-        severities=args.corruption_severities,
         eval_name="eval-test",
     )
     print(f"[eval] elapsed: {time.time() - t0:.1f}s")

@@ -2,106 +2,40 @@
 #
 # Unified evaluation infrastructure for image classifiers.
 #
-# ─────────────────────────────────────────────────────────────────────────────
-# Data structures
-# ─────────────────────────────────────────────────────────────────────────────
-#   PointwiseEvalBatch      – wraps a single (B, C, H, W) batch of inputs,
-#                             produced by clean or pointwise-adversarial transforms.
+# An Evaluator wraps (model, dataloader) and runs one metric per call, each over
+# its own pass of the data. A `transform` decides what the model sees, and its
+# return type decides how results are reduced:
 #
-#   DistributionEvalBatch   – wraps a (B, N, C, H, W) batch of N perturbed
-#                             copies per input, produced by distributional
-#                             (PR) transforms.
+#   PointwiseEvalBatch     (B, C, H, W)     -> {"mode": "pointwise", "acc",
+#                                               "loss", "num_samples"}
+#   DistributionEvalBatch  (B, N, C, H, W)  -> {"mode": "distribution", "pr",
+#                                               "num_draws", "num_samples"}
 #
-# ─────────────────────────────────────────────────────────────────────────────
-# Transform adapters
-# ─────────────────────────────────────────────────────────────────────────────
-#   identity_transform(model, x, y, **kwargs)
-#       Returns PointwiseEvalBatch(x) unchanged — used for standard clean eval.
+# where pr = mean fraction of the N draws that stay correctly classified. Both
+# shapes carry an optional "stats" key holding batch-size-weighted scalars that
+# the generator reported. Mixing batch types within one run raises.
 #
-#   adv_transform(model, x, y, attacker, **kwargs)
-#       Calls attacker(model, x, y, **kwargs) and wraps the result in a
-#       PointwiseEvalBatch. Any pointwise attacker (e.g. PGD) can be plugged in.
+# Note this is deliberately *not* the same thing as utils/epoch_eval.py:
+# evaluate_per_epoch collects every metric in a single pass, which is what
+# per-epoch evaluation during training needs. Evaluator trades that for the
+# freedom to run one metric at a time. Folding either into the other would
+# either slow training down or grow the code without removing anything, so
+# they are kept apart on purpose.
 #
-#   pr_transform(model, x, y, pr_generator, **kwargs)
-#       Calls pr_generator(model, x, y, **kwargs) which must return
-#       (x_samples, stats), and wraps the result in a DistributionEvalBatch.
-#
-# ─────────────────────────────────────────────────────────────────────────────
-# Evaluator class
-# ─────────────────────────────────────────────────────────────────────────────
-#   Evaluator(model, dataloader, criterion=None, device="cuda")
-#
-#   Public methods:
-#       .evaluate_standard(eval_name)
-#           Runs clean evaluation. Returns:
-#           {"mode": "pointwise", "acc": float, "loss": float|None,
-#            "num_samples": int [, "stats": dict]}
-#
-#       .evaluate_adversarial(attacker, eval_name, **kwargs)
-#           Runs pointwise adversarial evaluation using the given attacker.
-#           Returns the same dict shape as evaluate_standard.
-#
-#       .evaluate_pr(pr_generator, eval_name, **kwargs)
-#           Runs distributional PR evaluation. Returns:
-#           {"mode": "distribution", "pr": float, "num_samples": int,
-#            "num_draws": int [, "stats": dict]}
-#           where pr = mean fraction of N draws correctly classified per sample.
-#
-#       .evaluate(transform, eval_name, **kwargs)
-#           Generic entry point — the three methods above are thin wrappers
-#           around this. Accepts any transform returning a recognised batch type.
-#
-#       .update_loader(dataloader)
-#           Swap the dataloader without rebuilding the Evaluator.
-#
-# ─────────────────────────────────────────────────────────────────────────────
-# Private helpers
-# ─────────────────────────────────────────────────────────────────────────────
-#   _PointwiseAccumulator   – accumulates correct count and loss sum.
-#   _DistAccumulator        – accumulates PR sum and draw count.
-#   _StatsAccumulator       – batch-size-weighted accumulation of scalar stats.
-#   _assert_consistent_mode – raises if batch types are mixed within one run.
-#
-# ─────────────────────────────────────────────────────────────────────────────
-# Example usage
-# ─────────────────────────────────────────────────────────────────────────────
+# Example:
 #
 #   from utils.evaluator import Evaluator
-#   from src.adv_attacker import pgd_attack
-#   from src.langevin4pr import pr_generator
-#   from configs.train_clf_cfg import build_sigma_list
+#   from src.adv_loss import pgd_attack
 #
-#   evaluator = Evaluator(model, test_loader, criterion=nn.CrossEntropyLoss(),
-#                         device=device)
+#   ev = Evaluator(model, test_loader, criterion=nn.CrossEntropyLoss(), device=device)
+#   clean = ev.evaluate_standard()
+#   pgd   = ev.evaluate_adversarial(attacker=pgd_attack, epsilon=8/255,
+#                                   alpha=2/255, num_steps=20, norm="linf")
+#   pr    = ev.evaluate_pr_random(norm="linf", epsilon=8/255,
+#                                 num_samples=32, noise_dist="gaussian")
+#   ev.update_loader(train_loader)          # swap split, keep the Evaluator
 #
-#   # 1. Standard clean evaluation
-#   clean = evaluator.evaluate_standard()
-#   print(f"clean acc={clean['acc']*100:.2f}%  loss={clean['loss']:.4f}")
-#
-#   # 2. PGD adversarial evaluation
-#   pgd = evaluator.evaluate_adversarial(
-#       attacker=pgd_attack,
-#       eval_name="PGD-20",
-#       epsilon=8/255, alpha=2/255, num_steps=20, norm="linf",
-#   )
-#   print(f"pgd   acc={pgd['acc']*100:.2f}%  loss={pgd['loss']:.4f}")
-#
-#   # 3. PR distributional evaluation
-#   sigma_list = build_sigma_list(epsilon=8/255, K=3, mode_type="linear")
-#   pr = evaluator.evaluate_pr(
-#       pr_generator=pr_generator,
-#       eval_name="PR",
-#       norm="linf", epsilon=8/255,
-#       K=3, sigma_list=sigma_list,
-#       num_samples=32, beta_mix=1.0, kappa=1.0,
-#       fisher_damping=1e-7, tau=1e-4, noise_scale=1.0,
-#   )
-#   print(f"pr    pr={pr['pr']*100:.2f}%  draws={pr['num_draws']}")
-#   print(f"stats: { {k: f'{v:.3e}' for k, v in pr['stats'].items()} }")
-#
-#   # 4. Switch to train split without rebuilding
-#   evaluator.update_loader(train_loader)
-#   clean_train = evaluator.evaluate_standard(eval_name="standard-train")
+# Per-method details live in the docstrings below.
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -166,12 +100,9 @@ def pr_transform(model, x, y, pr_generator, **kwargs):
     """
     Distributional PR transform.
 
-    Example:
-        result = pr_transform(
-            model, x, y,
-            pr_generator=pr_generator,
-            epsilon=8/255, norm="linf", num_samples=32, ...
-        )
+    ``pr_generator`` is any callable returning (x_samples, stats) with
+    x_samples of shape (B, N, C, H, W).  Used by evaluate_pr_random and
+    evaluate_pr_gmm.
     """
     x_samples, stats = pr_generator(model, x, y, **kwargs)
     return DistributionEvalBatch(x=x_samples, stats=stats)
@@ -186,7 +117,6 @@ class Evaluator:
     Unified evaluator supporting:
       - Standard clean accuracy / loss              → evaluate_standard()
       - Pointwise adversarial accuracy / loss       → evaluate_adversarial()
-      - Distributional PR evaluation (Langevin)     → evaluate_pr()
       - Distributional PR evaluation (random noise) → evaluate_pr_random()
       - Distributional PR evaluation (trained GMM)  → evaluate_pr_gmm()
 
@@ -204,9 +134,8 @@ class Evaluator:
         )
 
         # PR distributional
-        results = evaluator.evaluate_pr(
-            pr_generator=pr_generator,
-            epsilon=8/255, norm="linf", num_samples=32, ...
+        results = evaluator.evaluate_pr_random(
+            epsilon=8/255, norm="linf", num_samples=32, noise_dist="gaussian",
         )
 
     All methods return a dict. Keys by mode:
@@ -244,22 +173,6 @@ class Evaluator:
             transform=adv_transform,
             eval_name=eval_name,
             attacker=attacker,
-            **kwargs,
-        )
-
-    def evaluate_pr(self, pr_generator, eval_name="pr", **kwargs):
-        """
-        Distributional PR evaluation.
-
-        Args:
-            pr_generator: function(model, x, y, **kwargs) -> (x_samples, stats)
-                          where x_samples has shape (B, N, C, H, W)
-            **kwargs: forwarded to pr_generator
-        """
-        return self.evaluate(
-            transform=pr_transform,
-            eval_name=eval_name,
-            pr_generator=pr_generator,
             **kwargs,
         )
 
@@ -344,8 +257,8 @@ class Evaluator:
             else:
                 batch_out = transform(self.model, x, y, **kwargs)
 
-            # Some transforms (e.g. pr_generator) may leave the model in
-            # train mode — restore eval mode before running inference.
+            # A transform may leave the model in train mode — restore eval
+            # mode before running inference.
             self.model.eval()
 
             if isinstance(batch_out, PointwiseEvalBatch):
