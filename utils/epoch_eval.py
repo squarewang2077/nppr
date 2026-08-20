@@ -4,8 +4,8 @@
 #   torch >= 2.0
 #
 # One pass over a loader produces every requested metric at once:
-#   clean accuracy/loss, PGD adversarial accuracy, margin level-set PR,
-#   and random-noise PR baselines.
+#   clean accuracy/loss, PGD and FGSM adversarial accuracy, margin level-set
+#   PR, and random-noise PR baselines.
 # AutoAttack is separate (evaluate_aa) because it needs its own loop.
 #
 # Every evaluation is opt-in: pass None for the configs you do not want and
@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from src.adv_loss import pgd_attack
+from src.adv_loss import fgsm_attack, pgd_attack
 from src.pos_geo_loss import solve_level_perturbations
 from utils.utils import pr_random_generator
 
@@ -36,7 +36,7 @@ def level_generator(model, x, y, **kwargs):
     Returns:
         x_adv: perturbed inputs, shape (B, N, C, H, W)
     """
-    delta, _, _ = solve_level_perturbations(
+    sol = solve_level_perturbations(
         model, x, y,
         t=kwargs.get("t", 0.0),
         epsilon=kwargs.get("epsilon", 8 / 255),
@@ -48,11 +48,11 @@ def level_generator(model, x, y, **kwargs):
         tol=kwargs.get("tol", 0.05),
         norm=kwargs.get("norm", "linf"),
     )
-    return (x.unsqueeze(1) + delta).clamp(0.0, 1.0)
+    return (x.unsqueeze(1) + sol.delta).clamp(0.0, 1.0)
 
 def evaluate_per_epoch(
     model, loader, device, criterion,
-    pgd_cfg=None, level_cfg=None, random_cfgs=None,
+    pgd_cfg=None, fgsm_cfg=None, level_cfg=None, random_cfgs=None,
     eval_name="eval",
 ):
     """Single-pass eval over loader. Each extra metric is gated by its config
@@ -65,9 +65,10 @@ def evaluate_per_epoch(
 
     Always returns: clean_acc, clean_loss, num_samples.
     Conditionally returns (None when disabled):
-        pgd_acc, level_pr, random_pr_breakdown.
+        pgd_acc, fgsm_acc, level_pr, random_pr_breakdown.
     """
     do_pgd    = pgd_cfg is not None
+    do_fgsm   = fgsm_cfg is not None
     do_level = level_cfg is not None
     do_random = bool(random_cfgs)
 
@@ -79,6 +80,7 @@ def evaluate_per_epoch(
     # return value below — keeping these as plain 0 / 0.0 makes them easy to
     # type-check (no Optional arithmetic).
     n_pgd_correct = 0
+    n_fgsm_correct = 0
     sum_level_pr = 0.0
     random_sum = {cfg["noise_dist"]: 0.0 for cfg in (random_cfgs or [])}
 
@@ -102,7 +104,14 @@ def evaluate_per_epoch(
             with torch.no_grad():
                 n_pgd_correct += (model(x_pgd).argmax(dim=1) == y).sum().item()
 
-        # 3) Level mean PR
+        # 3) FGSM — single-step, so it bounds PGD from above; a large gap
+        #    between the two is the usual sign of gradient masking.
+        if do_fgsm:
+            x_fgsm = fgsm_attack(model, x, y, **fgsm_cfg)
+            with torch.no_grad():
+                n_fgsm_correct += (model(x_fgsm).argmax(dim=1) == y).sum().item()
+
+        # 4) Level mean PR
         if do_level:
             x_level = level_generator(model, x, y, **level_cfg)  # (B, N, C, H, W)
             N_loc = x_level.shape[1]
@@ -111,7 +120,7 @@ def evaluate_per_epoch(
                               ).argmax(dim=1).view(B, N_loc)
                 sum_level_pr += (preds == y.unsqueeze(1)).float().mean(dim=1).sum().item()
 
-        # 4) Random-PR baseline — one pass per distribution
+        # 5) Random-PR baseline — one pass per distribution
         if do_random:
             for cfg in random_cfgs:
                 x_rand, _ = pr_random_generator(model, x, y, **cfg)
@@ -126,6 +135,7 @@ def evaluate_per_epoch(
         # tqdm postfix — only show enabled metrics
         post = {"clean": f"{n_clean_correct/n_total:.3f}"}
         if do_pgd:    post["pgd"]  = f"{n_pgd_correct/n_total:.3f}"
+        if do_fgsm:   post["fgsm"] = f"{n_fgsm_correct/n_total:.3f}"
         if do_level: post["loc"]  = f"{sum_level_pr/n_total:.3f}"
         if do_random: post["rnd"]  = f"{sum(random_sum.values())/(n_total*len(random_sum)):.3f}"
         pbar.set_postfix(**post)
@@ -136,6 +146,7 @@ def evaluate_per_epoch(
         "clean_acc":         n_clean_correct / n_total,
         "clean_loss":        (clean_loss_sum / n_total) if criterion is not None else None,
         "pgd_acc":           (n_pgd_correct / n_total) if do_pgd    else None,
+        "fgsm_acc":          (n_fgsm_correct / n_total) if do_fgsm  else None,
         "level_pr":         (sum_level_pr / n_total) if do_level else None,
         "random_pr_breakdown": random_breakdown,   # {dist: acc} or None
         "num_samples":       n_total,

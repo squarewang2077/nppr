@@ -2,7 +2,7 @@
 #
 # Description:
 #   This script trains an image classifier on CIFAR-10, CIFAR-100, or
-#   TinyImageNet using one of three training methods:
+#   TinyImageNet using one of four training methods:
 #
 #     standard   - Vanilla cross-entropy training on clean images.
 #     adv_pgd    - PGD adversarial training (Madry et al.).
@@ -11,11 +11,20 @@
 #     trades     - TRADES adversarial training (Zhang et al.).
 #                  Adds a KL-divergence regularisation term between clean
 #                  and adversarial logits controlled by --beta.
+#     adv_fgsm   - FGSM-RS adversarial training (Wong et al., ICLR 2020).
+#                  One signed step from a random start, so roughly num_steps
+#                  times cheaper than adv_pgd. L-inf only: --norm l2 is
+#                  rejected rather than silently ignored. --alpha does not
+#                  apply; the step is pinned to 1.25*epsilon as in the paper.
 #
 #   For every training run the script saves:
-#     <save_dir>/<arch>_<dataset>_<training_type>.pth          model checkpoint
-#     <save_dir>/<arch>_<dataset>_<training_type>.log          training log
-#     <save_dir>/<arch>_<dataset>_<training_type>_training_info.csv  per-epoch metrics
+#     <save_dir>/<arch>_<dataset>_<training_type>.pth             model checkpoint
+#     <results_dir>/<arch>_<dataset>_<training_type>.log          training log
+#     <results_dir>/<arch>_<dataset>_<training_type>_training_info.csv
+#
+#   --results_dir defaults to --save_dir, which is where the log and CSV used
+#   to go. --no_save_ckpt drops the checkpoint entirely, for ablation runs
+#   where only the CSV matters.
 #
 #   Evaluation is run every 5 epochs on a fixed subset of the training set
 #   (same size as the test set) and the full test set, reporting clean
@@ -42,7 +51,7 @@
 #                    densenet121, mobilenet_v3_large,
 #                    efficientnet_b0, vit_tiny, vit_small,
 #                    convit_tiny, convit_small}        (default: resnet18)
-#   --training_type {standard, adv_pgd, trades}        (default: adv_pgd)
+#   --training_type {standard, adv_pgd, trades, adv_fgsm}  (default: adv_pgd)
 #   --epochs        number of training epochs           (default: 50)
 #   --batch_size    mini-batch size                     (default: 128)
 #   --lr            initial learning rate               (default: 0.1)
@@ -92,8 +101,9 @@ import pandas as pd
 
 from arch import build_model
 from utils.preprocess_data import get_dataset, get_img_size
-from src.adv_loss import pgd_at_loss, trades_loss
+from src.adv_loss import fgsm_at_loss, pgd_at_loss, trades_loss
 from utils.epoch_eval import evaluate_per_epoch, evaluate_aa
+from src.pos_geo_loss import matched_l2_epsilon
 
 def setup_logger(log_path: str) -> logging.Logger:
     """Return a logger that writes to both stdout and *log_path*."""
@@ -192,6 +202,13 @@ def train_one_epoch_adv(model, loader, optimizer, device, criterion,
         elif adv_type == "trades":
             loss, x_adv = trades_loss(model, x, y, epsilon, alpha, num_steps, beta, criterion, norm=norm)
             x_eval = x_adv
+        elif adv_type == "adv_fgsm":
+            # Single-step, so no num_steps and no norm: fgsm_at_loss is L-inf
+            # only (it steps with sign()). alpha defaults to 1.25*epsilon, the
+            # value the FGSM-RS paper recommends, and --alpha does not apply
+            # here since the PGD default of 2/255 would make it a no-op step.
+            loss, x_adv = fgsm_at_loss(model, x, y, epsilon, criterion)
+            x_eval = x_adv
         else:
             raise ValueError(f"Unknown adv_type: {adv_type}")
 
@@ -243,12 +260,16 @@ def main():
     ap.add_argument("--img_size", type=int, default=None,
                     help="Input image size (will be resized if dataset images are different)")
     # Training Method
-    ap.add_argument("--training_type", choices=["standard", "adv_pgd", "trades"], default="adv_pgd",
-                    help="Training method: standard, adv_pgd (PGD-AT), trades (TRADES)")
+    ap.add_argument("--training_type",
+                    choices=["standard", "adv_pgd", "trades", "adv_fgsm"],
+                    default="adv_pgd",
+                    help="Training method: standard, adv_pgd (PGD-AT), trades "
+                         "(TRADES), adv_fgsm (FGSM-RS, single step, L-inf only)")
 
     # Adversarial Training Settings (for PGD-AT and TRADES)
     ap.add_argument("--norm", choices=["linf", "l2"], default="linf",
-                    help="Norm for adversarial perturbations (for PGD-AT and TRADES)")
+                    help="Norm for adversarial perturbations (for PGD-AT and "
+                         "TRADES; adv_fgsm is L-inf only and rejects l2)")
     ap.add_argument("--epsilon", type=float, default=8/255,
                     help="Perturbation budget")
     ap.add_argument("--alpha", type=float, default=2/255,
@@ -276,6 +297,12 @@ def main():
     ap.add_argument("--pgd_norm", choices=["linf", "l2"], default="linf",
                     help="Norm constraint for PGD eval.")
 
+    # FGSM. Single-step, so it bounds PGD from above; a large gap between the
+    # two is the usual sign of gradient masking. L-inf only, alpha pinned to
+    # 1.25*epsilon as in FGSM-RS.
+    ap.add_argument("--eval_fgsm", action="store_true",
+                    help="Run FGSM adversarial eval at every eval cycle.")
+
     # Local-Entropy mean-PR (sensible defaults; n + steps + norm exposed,
     # other Level internals pinned inside level_generator).
     ap.add_argument("--eval_level", action="store_true",
@@ -288,6 +315,12 @@ def main():
                     help="Target margin level for the level-set eval attack.")
     ap.add_argument("--level_norm", choices=["linf", "l2"], default="linf",
                     help="Norm constraint for the level-set attack.")
+    ap.add_argument("--level_epsilon", type=float, default=None,
+                    help="Perturbation budget for the level-set eval, independent "
+                         "of the training --epsilon. When omitted it follows "
+                         "--epsilon for linf, and for l2 uses the matched radius "
+                         "eps*sqrt(d/3) -- the training epsilon is sized for linf "
+                         "and gives a far too small l2 ball.")
 
     # Random-noise PR baseline. --random_dist accepts multiple distributions;
     # one PR score is reported per distribution.
@@ -315,6 +348,14 @@ def main():
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--save_dir", type=str, default="./ckp/adv_training",
                     help="Directory to save best checkpoint")
+    ap.add_argument("--results_dir", type=str, default=None,
+                    help="Directory for the log and the per-epoch CSV. Defaults "
+                         "to --save_dir, which is where both used to go; point "
+                         "it elsewhere to keep results out of the checkpoint "
+                         "tree.")
+    ap.add_argument("--no_save_ckpt", action="store_true",
+                    help="Do not write a checkpoint. For ablation runs where "
+                         "only the CSV matters.")
 
     args = ap.parse_args()
 
@@ -326,16 +367,31 @@ def main():
     img_size = get_img_size(args.dataset, args.img_size)
 
     # Set up output directory and logger early so config lines are captured
-    os.makedirs(args.save_dir, exist_ok=True)
+    if args.results_dir is None:
+        args.results_dir = args.save_dir
+    os.makedirs(args.results_dir, exist_ok=True)
+    if not args.no_save_ckpt:
+        os.makedirs(args.save_dir, exist_ok=True)
     aug_suffix = "_Aug" if args.augment else ""
     name_tag = f"{args.arch.lower()}_{args.dataset.lower()}_{args.training_type}{aug_suffix}"
-    log_path = os.path.join(args.save_dir, f"{name_tag}.log")
+    log_path = os.path.join(args.results_dir, f"{name_tag}.log")
     logger = setup_logger(log_path)
 
     # Log config
     logger.info(f"[config] dataset={args.dataset}, arch={args.arch}, pretrained={args.pretrained}")
     aug_state = "ENABLED (RandomCrop+Flip+RandAugment+RandomErasing)" if args.augment else "DISABLED (no-aug train set)"
     logger.info(f"[config] img_size={img_size}, augmentation={aug_state}")
+
+    # Budget for the level-set eval. It is deliberately separate from the
+    # training --epsilon, which is sized for linf: reused under --level_norm l2
+    # it would give a ball far too small for the level set to sit inside.
+    level_epsilon = args.level_epsilon
+    if level_epsilon is None:
+        level_epsilon = (args.epsilon if args.level_norm == "linf"
+                         else matched_l2_epsilon(args.epsilon, img_size))
+    if args.eval_level:
+        logger.info(f"[config] level eval: norm={args.level_norm}, "
+                    f"epsilon={level_epsilon:.4f}, t={args.level_t}")
     if args.training_type == "standard":
         logger.info(f"[config] training_type={args.training_type}, no adversarial perturbations")
     elif args.training_type == "adv_pgd":
@@ -344,6 +400,18 @@ def main():
     elif args.training_type == "trades":
         logger.info(f"[config] training_type={args.training_type}, epsilon={args.epsilon:.4f}, norm={args.norm} "
                     f"alpha={args.alpha:.4f}, num_steps={args.num_steps}, beta={args.beta}")
+    elif args.training_type == "adv_fgsm":
+        # fgsm_at_loss steps with sign(), so it is L-inf whatever --norm says.
+        # Fail loudly rather than silently training against the wrong threat
+        # model, which would only show up as an unexplained l2 robustness gap.
+        if args.norm != "linf":
+            raise ValueError(
+                f"training_type=adv_fgsm is L-inf only (it steps with sign()), "
+                f"but --norm {args.norm} was given. Use --norm linf, or "
+                f"--training_type adv_pgd for an l2 threat model.")
+        logger.info(f"[config] training_type={args.training_type} (FGSM-RS), "
+                    f"epsilon={args.epsilon:.4f}, norm=linf, "
+                    f"alpha=1.25*epsilon={1.25 * args.epsilon:.4f}, num_steps=1")
     else:
         raise ValueError(f"Unknown training_type: {args.training_type}")
 
@@ -405,11 +473,13 @@ def main():
         "beta":      args.beta,
     }
 
-    # Output path
+    # Output paths
     out_path = os.path.join(args.save_dir, f"{name_tag}.pth")
-    logger.info(f"[save] checkpoint -> {out_path}")
+    info_csv_path = os.path.join(args.results_dir, f"{name_tag}_training_info.csv")
+    logger.info(f"[save] checkpoint -> "
+                f"{out_path if not args.no_save_ckpt else 'disabled (--no_save_ckpt)'}")
     logger.info(f"[save] log       -> {log_path}")
-    logger.info(f"[save] csv       -> {os.path.join(args.save_dir, f'{name_tag}_training_info.csv')}")
+    logger.info(f"[save] csv       -> {info_csv_path}")
 
     # Train
     ep = 0  # Initialize epoch counter
@@ -418,7 +488,7 @@ def main():
         if args.training_type == "standard":
             train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, device, criterion,
                                                     epoch=ep, total_epochs=args.epochs)
-        elif args.training_type in ["adv_pgd", "trades"]:
+        elif args.training_type in ["adv_pgd", "trades", "adv_fgsm"]:
             train_loss, train_acc = train_one_epoch_adv(model, train_loader, optimizer, device, criterion, adv_config,
                                                         epoch=ep, total_epochs=args.epochs)
         else:
@@ -443,10 +513,17 @@ def main():
                     "norm":      args.pgd_norm,
                 }
 
+            # FGSM is single-step, so it bounds PGD from above; a large gap
+            # between the two is the usual sign of gradient masking.
+            fgsm_cfg = None
+            if args.eval_fgsm:
+                fgsm_cfg = {"epsilon": args.epsilon,
+                            "alpha":   1.25 * args.epsilon}
+
             level_cfg = None
             if args.eval_level:
                 level_cfg = {
-                    "epsilon":    args.epsilon,
+                    "epsilon":    level_epsilon,
                     "norm":       args.level_norm,
                     "t":          args.level_t,
                     "num_starts": args.level_n,
@@ -470,14 +547,16 @@ def main():
             ## Evaluation on Test set ##
             test_metrics = evaluate_per_epoch(
                 model, test_loader, device, criterion,
-                pgd_cfg=pgd_cfg, level_cfg=level_cfg, random_cfgs=random_cfgs,
+                pgd_cfg=pgd_cfg, fgsm_cfg=fgsm_cfg, level_cfg=level_cfg,
+                random_cfgs=random_cfgs,
                 eval_name=f"eval-test [{ep}/{args.epochs}]",
             )
 
             ## Evaluation on Train subset (same size as test set) ##
             train_metrics = evaluate_per_epoch(
                 model, subtrain_loader, device, criterion,
-                pgd_cfg=pgd_cfg, level_cfg=level_cfg, random_cfgs=random_cfgs,
+                pgd_cfg=pgd_cfg, fgsm_cfg=fgsm_cfg, level_cfg=level_cfg,
+                random_cfgs=random_cfgs,
                 eval_name=f"eval-trainS [{ep}/{args.epochs}]",
             )
 
@@ -508,6 +587,7 @@ def main():
                     parts.append(f"loss={m['clean_loss']:.4f}")
                 parts.append(f"clean={_pct(m['clean_acc'])}")
                 if m["pgd_acc"]    is not None: parts.append(f"pgd{args.pgd_steps}={_pct(m['pgd_acc'])}")
+                if m["fgsm_acc"]   is not None: parts.append(f"fgsm={_pct(m['fgsm_acc'])}")
                 if m["level_pr"]  is not None: parts.append(f"level={_pct(m['level_pr'])}")
                 rb = m.get("random_pr_breakdown")
                 if rb:
@@ -548,6 +628,7 @@ def main():
                 'trainS_loss':         train_metrics['clean_loss'],
                 'trainS_acc':          train_metrics['clean_acc'],
                 'trainS_pgd':          train_metrics['pgd_acc'],
+                'trainS_fgsm':         train_metrics['fgsm_acc'],
                 'trainS_level':       train_metrics['level_pr'],
                 'trainS_random_g':     _r(train_metrics, 'gaussian'),
                 'trainS_random_u':     _r(train_metrics, 'uniform'),
@@ -557,6 +638,7 @@ def main():
                 'val_loss':            test_metrics['clean_loss'],
                 'val_acc':             test_metrics['clean_acc'],
                 'val_pgd':             test_metrics['pgd_acc'],
+                'val_fgsm':            test_metrics['fgsm_acc'],
                 'val_level':          test_metrics['level_pr'],
                 'val_random_g':        _r(test_metrics, 'gaussian'),
                 'val_random_u':        _r(test_metrics, 'uniform'),
@@ -566,7 +648,6 @@ def main():
             training_history.append(epoch_info)
 
             # overwrite CSV with the full history so far
-            info_csv_path = os.path.join(args.save_dir, f"{name_tag}_training_info.csv")
             pd.DataFrame(training_history).to_csv(info_csv_path, index=False)
             logger.info(f"  -> saved training info to {info_csv_path}")
 
@@ -582,11 +663,14 @@ def main():
         "training_type": args.training_type,
         "model_state": model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
     }
-    if args.training_type in ["adv_pgd", "trades"]:
+    if args.training_type in ["adv_pgd", "trades", "adv_fgsm"]:
         ckpt["adv_config"] = adv_config
 
-    torch.save(ckpt, out_path)
-    logger.info(f"  -> saved last checkpoint to {out_path}")
+    if args.no_save_ckpt:
+        logger.info("  -> checkpoint not saved (--no_save_ckpt)")
+    else:
+        torch.save(ckpt, out_path)
+        logger.info(f"  -> saved last checkpoint to {out_path}")
 
 
 if __name__ == "__main__":

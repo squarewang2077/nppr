@@ -368,6 +368,3 @@ def check_mode_collapse(gmm, loader, device, num_batches=10):
         gmm.train()
 
 
-# ------------------------------------------------------------------
-#   Helper function to build sigma_list for GMM prior
-# ------------------------------------------------------------------

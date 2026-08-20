@@ -9,11 +9,14 @@
 #   PointwiseEvalBatch     (B, C, H, W)     -> {"mode": "pointwise", "acc",
 #                                               "loss", "num_samples"}
 #   DistributionEvalBatch  (B, N, C, H, W)  -> {"mode": "distribution", "pr",
-#                                               "num_draws", "num_samples"}
+#                                               "pr_values", "num_draws",
+#                                               "num_samples"}
 #
-# where pr = mean fraction of the N draws that stay correctly classified. Both
-# shapes carry an optional "stats" key holding batch-size-weighted scalars that
-# the generator reported. Mixing batch types within one run raises.
+# where pr = mean fraction of the N draws that stay correctly classified, and
+# pr_values is that same quantity kept per sample — feed it to prob_accuracy()
+# for Prob.Acc(gamma). Both shapes carry an optional "stats" key holding
+# batch-size-weighted scalars that the generator reported. Mixing batch types
+# within one run raises.
 #
 # Note this is deliberately *not* the same thing as utils/epoch_eval.py:
 # evaluate_per_epoch collects every metric in a single pass, which is what
@@ -33,6 +36,7 @@
 #                                   alpha=2/255, num_steps=20, norm="linf")
 #   pr    = ev.evaluate_pr_random(norm="linf", epsilon=8/255,
 #                                 num_samples=32, noise_dist="gaussian")
+#   print(prob_accuracy(pr["pr_values"]))   # Aug.Acc, Mean/Std, Prob.Acc(gamma)
 #   ev.update_loader(train_loader)          # swap split, keep the Evaluator
 #
 # Per-method details live in the docstrings below.
@@ -109,6 +113,55 @@ def pr_transform(model, x, y, pr_generator, **kwargs):
 
 
 # =========================================
+# PR summary statistics
+# =========================================
+
+def prob_accuracy(pr_values, quantiles=(0.2, 0.1, 0.05, 0.01)):
+    """
+    Prob.Acc(gamma) from a set of per-sample PR values.
+
+    Prob.Acc(gamma) is the fraction of inputs whose probabilistic robustness
+    exceeds 1 - gamma, i.e. inputs for which at most gamma of the epsilon-ball
+    is misclassified. Reported alongside the mean PR ("Aug.Acc"), which alone
+    hides whether the mass sits in a few catastrophic inputs or is spread thin.
+
+    Feed it the "pr_values" entry of any distributional evaluation result:
+
+        pr = evaluator.evaluate_pr_random(epsilon=8/255, norm="linf",
+                                          num_samples=100, noise_dist="uniform")
+        stats = prob_accuracy(pr["pr_values"])
+
+    Note on comparability with the AT-PR paper: Zhang et al. exclude inputs the
+    model already misclassifies when clean from all reported statistics. This
+    function counts every input the evaluation saw, so numbers here run lower
+    than the published ones by roughly the clean error rate. Filter pr_values
+    yourself before calling if you need the paper's convention.
+
+    Args:
+        pr_values: 1-D tensor/array of per-sample PR in [0, 1]. NaNs are dropped.
+        quantiles: gamma values to report.
+
+    Returns:
+        dict with Aug.Acc (mean PR, %), Mean/Std (formatted string, %), and one
+        Prob.Acc_{gamma} entry per quantile (%). Empty dict if nothing is left
+        after dropping NaNs.
+    """
+    pr = torch.as_tensor(pr_values).flatten()
+    pr = pr[~torch.isnan(pr)]
+    if pr.numel() == 0:
+        return {}
+
+    out = {
+        "Aug.Acc": pr.mean().item() * 100,
+        "Mean/Std": f"{pr.mean().item() * 100:.2f}/"
+                    f"{pr.std(unbiased=False).item() * 100:.2f}",
+    }
+    for gamma in quantiles:
+        out[f"Prob.Acc_{gamma}"] = (pr > (1 - gamma)).float().mean().item() * 100
+    return out
+
+
+# =========================================
 # Evaluator
 # =========================================
 
@@ -141,7 +194,11 @@ class Evaluator:
     All methods return a dict. Keys by mode:
 
         Pointwise:      {"mode", "acc", "loss", "num_samples" [, "stats"]}
-        Distributional: {"mode", "pr",  "num_samples", "num_draws" [, "stats"]}
+        Distributional: {"mode", "pr", "pr_values", "num_samples",
+                         "num_draws" [, "stats"]}
+
+    "pr_values" is the (num_samples,) per-sample PR vector; pass it to
+    prob_accuracy() for Prob.Acc(gamma).
     """
 
     def __init__(self, model, dataloader, criterion=None, device="cuda"):
@@ -321,9 +378,12 @@ class Evaluator:
         pr_per_sample = (preds == y_flat).view(B, N).float().mean(dim=1)
 
         return {
-            "pr_sum":      pr_per_sample.sum().item(),
-            "num_samples": B,
-            "num_draws":   B * N,
+            "pr_sum":        pr_per_sample.sum().item(),
+            "num_samples":   B,
+            "num_draws":     B * N,
+            # Kept per-sample as well as summed: Prob.Acc(gamma) needs the
+            # whole distribution, not just its mean. See prob_accuracy below.
+            "pr_per_sample": pr_per_sample.cpu(),
         }
 
 
@@ -371,11 +431,13 @@ class _DistAccumulator:
         self.pr_sum      = 0.0
         self.num_samples = 0
         self.num_draws   = 0
+        self.pr_values   = []
 
     def update(self, batch: dict):
         self.pr_sum      += batch["pr_sum"]
         self.num_samples += batch["num_samples"]
         self.num_draws   += batch["num_draws"]
+        self.pr_values.append(batch["pr_per_sample"])
 
     def result(self) -> dict:
         n = max(1, self.num_samples)
@@ -384,6 +446,9 @@ class _DistAccumulator:
             "pr":          self.pr_sum / n,
             "num_samples": self.num_samples,
             "num_draws":   self.num_draws,
+            # (num_samples,) per-sample PR, for prob_accuracy().
+            "pr_values":   torch.cat(self.pr_values) if self.pr_values
+                           else torch.empty(0),
         }
 
 
